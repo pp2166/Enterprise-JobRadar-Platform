@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>jobhunt</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <header>
+    <h1>jobhunt</h1>
+    <p class="tagline">deduplicated, ranked jobs — from multiple sources</p>
+  </header>
+
+  <form id="search-form">
+    <input type="text" id="q" name="q" placeholder="e.g. senior python remote" autofocus />
+    <input type="text" id="location" name="location" placeholder="location" />
+    <select id="experience" name="experience">
+      <option value="">any experience</option>
+      <option value="junior">junior</option>
+      <option value="mid">mid</option>
+      <option value="senior">senior</option>
+    </select>
+    <label class="check">
+      <input type="checkbox" id="remote" name="remote" /> remote only
+    </label>
+    <button type="submit">search</button>
+  </form>
+
+  <section id="meta"></section>
+  <section id="results"></section>
+  <nav id="pager"></nav>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

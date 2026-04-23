@@ -1,0 +1,73 @@
+# Keep the Docker build context small and free of host-only junk / secrets.
+
+# --- VCS & CI ---
+.git
+.gitignore
+.gitattributes
+.github/
+
+# --- Python caches & venvs ---
+__pycache__
+*.py[cod]
+*.so
+*.egg
+*.egg-info
+.venv
+venv
+env
+.tox
+.nox
+
+# --- Tool caches ---
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.hypothesis
+.coverage
+.coverage.*
+htmlcov
+coverage.xml
+
+# --- Secrets & environment ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# --- Local data ---
+*.db
+*.sqlite
+*.sqlite3
+pgdata/
+postgres-data/
+redis-data/
+data/
+dumps/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea
+.vscode
+*.swp
+*.swo
+
+# --- AI / local dev tooling ---
+.claude
+.cursor
+.aider*
+
+# --- Docs / markdown (optional — keeps image slimmer) ---
+# Comment these out if you want docs inside the image.
+# *.md
+# docs/
+
+# --- Tests (we don't run them inside the production image) ---
+tests/
+
+# --- Build / dist artifacts ---
+build
+dist
+node_modules

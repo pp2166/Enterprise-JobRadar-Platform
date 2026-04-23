@@ -1,0 +1,109 @@
+# --- Python bytecode / build artifacts ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+pip-wheel-metadata/
+*.manifest
+*.spec
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- uv / pip ---
+# uv.lock SHOULD be committed — do NOT ignore it.
+pip-log.txt
+pip-delete-this-directory.txt
+
+# --- Tool caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.tox/
+.nox/
+.hypothesis/
+.cache/
+
+# --- Coverage ---
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+*.py,cover
+.benchmarks/
+
+# --- Environment files / secrets ---
+# Keep .env.example tracked; ignore any real env file.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+secrets/
+secrets.yaml
+secrets.yml
+*.secret
+*.secrets
+
+# --- Local databases / crawl artifacts ---
+*.db
+*.sqlite
+*.sqlite3
+pgdata/
+postgres-data/
+redis-data/
+data/
+dumps/
+
+# --- Logs ---
+*.log
+logs/
+
+# --- OS metadata ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+._*
+
+# --- Editor / IDE ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.nvimlog
+
+# --- Claude Code / AI tooling (local per-dev config) ---
+.claude/
+.cursor/
+.aider*
+
+# --- Node (in case a frontend is added later) ---
+node_modules/
+.npm/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- Jupyter (in case notebooks are used for data work) ---
+.ipynb_checkpoints/
+
+# --- Docker scratch ---
+.docker/
