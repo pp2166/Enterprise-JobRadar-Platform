@@ -1,25 +1,42 @@
-# jobhunt
+<p align="center">
+  <img src="assets/banner.png" alt="Talash — Self-hostable job aggregation engine" width="100%">
+</p>
 
-> The open-source job aggregation engine. Crawls remote-first boards in parallel,
-> normalizes everything into a single schema, dedupes reposts with SimHash, and
-> serves blazing-fast Postgres full-text search behind a clean FastAPI + minimal UI.
+<p align="center">
+  <strong>तलाश (talāsh)</strong> — <em>Hindi for "search"</em>
+</p>
 
-**Python 3.11+** · **FastAPI** · **SQLAlchemy 2.0 async** · **PostgreSQL FTS** ·
-**Celery + Redis** · **Docker Compose** · **SimHash dedup** · **pluggable crawlers**
+<p align="center">
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.11+"></a>
+  <a href="https://github.com/iamrahulroyy/talash/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/iamrahulroyy/talash/ci.yml?branch=main&style=for-the-badge&label=CI" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT License"></a>
+  <a href="https://github.com/iamrahulroyy/talash/stargazers"><img src="https://img.shields.io/github/stars/iamrahulroyy/talash?style=for-the-badge&color=gold" alt="Stars"></a>
+</p>
+
+<p align="center">
+  The open-source job aggregation engine.<br>
+  Crawls remote-first boards in parallel, normalizes everything into a single schema,<br>
+  dedupes reposts with SimHash, and serves blazing-fast Postgres full-text search<br>
+  behind a clean FastAPI + minimal UI.
+</p>
+
+<p align="center">
+  <code>FastAPI</code> · <code>SQLAlchemy 2.0 async</code> · <code>PostgreSQL FTS</code> · <code>Celery + Redis</code> · <code>Docker Compose</code> · <code>SimHash dedup</code> · <code>Pluggable crawlers</code>
+</p>
 
 ---
 
-## Why jobhunt
+## Why Talash?
 
-Existing job boards are walled gardens, slow, and full of reposts. jobhunt is
+Existing job boards are walled gardens, slow, and full of reposts. Talash is
 a **self-hostable, developer-first** alternative:
 
-- Add a new source in ~40 lines of Python.
-- Near-duplicate listings across boards collapse automatically via 64-bit SimHash.
-- Search is **Postgres native** (tsvector + GIN + weighted rank + recency decay) —
+- 🔌 **Add a new source in ~40 lines of Python.**
+- 🧬 Near-duplicate listings across boards collapse automatically via **64-bit SimHash**.
+- 🔍 Search is **Postgres native** (tsvector + GIN + weighted rank + recency decay) —
   no Elasticsearch cluster needed until you actually have one.
-- Async crawlers, async API, async SQLAlchemy — the whole stack breathes.
-- Everything runs on `docker compose up`.
+- ⚡ Async crawlers, async API, async SQLAlchemy — the whole stack breathes.
+- 🐳 Everything runs on `docker compose up`.
 
 ---
 
@@ -62,123 +79,74 @@ a **self-hostable, developer-first** alternative:
 
 ---
 
-## Current features (shipped)
+## ✅ Features
 
 ### Crawling & ingestion
 
-- ✅ Async `BaseCrawler` with shared HTTPX client, per-source concurrency
+- Async `BaseCrawler` with shared HTTPX client, per-source concurrency
   semaphore, and 3-attempt exponential backoff.
-- ✅ RemoteOK crawler (public JSON feed).
-- ✅ We Work Remotely crawler (5 category RSS feeds).
-- ✅ Pluggable crawler registry — one entry point to add a new source.
-- ✅ Normalization: HTML stripping (selectolax), whitespace squishing,
+- RemoteOK crawler (public JSON feed).
+- We Work Remotely crawler (5 category RSS feeds).
+- Pluggable crawler registry — one entry point to add a new source.
+- Normalization: HTML stripping (selectolax), whitespace squishing,
   salary regex with `$`/`k`/comma-aware parsing, experience level inference
   (junior/mid/senior), timezone-aware `posted_at`, remote/anywhere detection.
-- ✅ 64-bit SimHash near-duplicate detection, stored as signed BIGINT
+- 64-bit SimHash near-duplicate detection, stored as signed BIGINT
   (Postgres-compatible). Configurable Hamming threshold.
-- ✅ Upsert on `(source, source_id)` — crawlers can be re-run safely.
-- ✅ Ingest stats (`received / inserted / updated / duplicates`).
+- Upsert on `(source, source_id)` — crawlers can be re-run safely.
+- Ingest stats (`received / inserted / updated / duplicates`).
 
 ### API & search
 
-- ✅ `GET /search` — free text + filters + pagination. Supports quoted
+- `GET /search` — free text + filters + pagination. Supports quoted
   phrases, `AND` / `OR`, and `-` negation via `websearch_to_tsquery`.
-- ✅ `GET /jobs/{id}` — single job detail with 404.
-- ✅ `GET /admin/sources` — list registered crawlers.
-- ✅ `POST /admin/crawl` — trigger one or all crawlers.
-- ✅ `GET /healthz` — liveness probe.
-- ✅ OpenAPI + Swagger UI at `/docs`.
-- ✅ Ranked search: relevance + title-boost + recency decay (14-day half-life).
-- ✅ Pagination with `page_size` clamped to 100.
+- `GET /jobs/{id}` — single job detail with 404.
+- `GET /admin/sources` — list registered crawlers.
+- `POST /admin/crawl` — trigger one or all crawlers.
+- `GET /healthz` — liveness probe.
+- OpenAPI + Swagger UI at `/docs`.
+- Ranked search: relevance + title-boost + recency decay (14-day half-life).
+- Pagination with `page_size` clamped to 100.
 
 ### Scheduling & infrastructure
 
-- ✅ Celery worker + Celery beat for automated every-30-min crawls per source.
-- ✅ Task retries (max 3, `acks_late`, `reject_on_worker_lost`).
-- ✅ Idempotent schema bootstrap — no Alembic required for MVP.
-- ✅ Postgres trigger that maintains a weighted tsvector
+- Celery worker + Celery beat for automated every-30-min crawls per source.
+- Task retries (max 3, `acks_late`, `reject_on_worker_lost`).
+- Idempotent schema bootstrap — no Alembic required for MVP.
+- Postgres trigger that maintains a weighted tsvector
   (title=A, company=B, tags=B, location=C, description=D).
-- ✅ Full `docker-compose.yml`: Postgres + Redis + API + worker + beat.
-- ✅ Dev task runner via `uv` + `taskipy`.
+- Full `docker-compose.yml`: Postgres + Redis + API + worker + beat.
+- Dev task runner via `uv` + `taskipy`.
 
 ### Frontend
 
-- ✅ Minimal zero-build single-page UI (static HTML/CSS/JS) with live search,
+- Minimal zero-build single-page UI (static HTML/CSS/JS) with live search,
   filters (location, remote, experience), and pagination.
 
 ### Developer experience
 
-- ✅ **160-test production suite** covering unit / integration / edge cases
-  (see [Test suite](#test-suite)).
-- ✅ Ruff lint + format.
-- ✅ SQLite-compatible models so tests run without Postgres.
+- **160-test** production suite covering unit / integration / edge cases
+  (see [Test suite](#-test-suite)).
+- Ruff lint + format.
+- SQLite-compatible models so tests run without Postgres.
+- GitHub Actions CI (lint + test on every push).
 
 ---
 
-## Roadmap (phase-wise)
+## 🚀 Quickstart
 
-### Phase 1 — Hardening (next)
-
-- 🛠️ API key / JWT auth on `/admin/*` endpoints.
-- 🛠️ Rate limiting (slowapi or reverse-proxy based).
-- 🛠️ Structured logging (structlog + request IDs).
-- 🛠️ Prometheus `/metrics` endpoint (requests, crawl latency, dedup hit rate).
-- 🛠️ Alembic migrations alongside the idempotent bootstrap.
-- 🛠️ GitHub Actions: lint · typecheck · test · Docker build.
-- 🛠️ Pre-commit hooks (ruff + mypy).
-
-### Phase 2 — More sources
-
-- 🛠️ Hacker News "Who's Hiring" monthly scrape.
-- 🛠️ Wellfound / AngelList public listings.
-- 🛠️ Lever / Greenhouse / Workable job-board APIs (one adapter per ATS).
-- 🛠️ Generic career-page scraper with per-company selector configs.
-- 🛠️ Robots.txt + Crawl-Delay honouring per source.
-
-### Phase 3 — Better search
-
-- 🛠️ Hybrid BM25 + semantic embeddings (pgvector) for "jobs like this one".
-- 🛠️ Skill / tech-stack facets (extracted from description at ingest).
-- 🛠️ Salary normalization to annual USD + purchasing-power overlay.
-- 🛠️ Company enrichment (size, sector, Glassdoor-style metadata).
-- 🛠️ Location geocoding + radius search.
-- 🛠️ Saved searches → email / RSS / webhook alerts.
-
-### Phase 4 — User-facing product
-
-- 🛠️ User accounts, application tracker, kanban board.
-- 🛠️ Resume-aware recommendations (embed once, rank on query).
-- 🛠️ "Hide company" / "hide keyword" personal blocklists.
-- 🛠️ Browser extension: one-click save from any source page.
-- 🛠️ Public Next.js front-end replacing the static MVP UI.
-
-### Phase 5 — Scale
-
-- 🛠️ Drop-in Elasticsearch / OpenSearch backend for the search layer.
-- 🛠️ MinHash LSH index replacing in-memory SimHash for 10M+ listings.
-- 🛠️ Distributed crawl coordinator (Celery → Temporal or Arq).
-- 🛠️ Read replicas + connection pooler (pgbouncer).
-- 🛠️ S3 archival of raw crawl payloads for replay / re-normalization.
-- 🛠️ Public dataset + BigQuery export.
-
-### Phase 6 — Community
-
-- 🛠️ Public demo at `demo.jobhunt.dev`.
-- 🛠️ Plugin marketplace for community crawlers.
-- 🛠️ Contributor guide + issue templates + governance doc.
-
----
-
-## Quickstart — Docker
+### Docker (recommended)
 
 ```bash
+git clone https://github.com/iamrahulroyy/talash.git
+cd talash
 cp .env.example .env
 docker compose up --build
 ```
 
-- UI:  <http://localhost:8000/>
-- API docs: <http://localhost:8000/docs>
-- Trigger an immediate crawl:
+- **UI**: http://localhost:8000/
+- **API docs**: http://localhost:8000/docs
+- **Trigger a crawl**:
 
   ```bash
   curl -X POST http://localhost:8000/admin/crawl \
@@ -187,7 +155,7 @@ docker compose up --build
 
 Celery beat fires crawls every 30 minutes automatically.
 
-## Quickstart — local (no Docker)
+### Local (no Docker)
 
 Dependencies and tasks are managed with [uv](https://docs.astral.sh/uv/) and
 [taskipy](https://github.com/taskipy/taskipy). Postgres 14+ and Redis 7+ must
@@ -202,11 +170,13 @@ uv run task worker      # terminal 2 — Celery worker
 uv run task beat        # terminal 3 — Celery beat (optional)
 ```
 
-## Dev tasks
+---
 
-| command              | what it does                                |
+## 🛠️ Dev tasks
+
+| Command              | What it does                                |
 |----------------------|---------------------------------------------|
-| `uv run task api`    | FastAPI dev server (`uvicorn --reload`)     |
+| `uv run task api`    | FastAPI dev server (`uvicorn --reload`)      |
 | `uv run task worker` | Celery worker                               |
 | `uv run task beat`   | Celery beat scheduler                       |
 | `uv run task test`   | `pytest -q`                                 |
@@ -218,11 +188,11 @@ uv run task beat        # terminal 3 — Celery beat (optional)
 
 ---
 
-## API
+## 📡 API
 
 ### `GET /search`
 
-| name         | type    | notes                                         |
+| Name         | Type    | Notes                                         |
 |--------------|---------|-----------------------------------------------|
 | `q`          | string  | free text; supports `"phrase"`, `AND/OR`, `-` |
 | `location`   | string  | substring match                               |
@@ -257,7 +227,9 @@ Returns `{ "sources": ["remoteok", "weworkremotely"] }`.
 
 ---
 
-## Adding a new source
+## 🔌 Adding a new source
+
+This is the best way to contribute! Each crawler is ~40 lines:
 
 1. Create `app/crawlers/<name>.py` subclassing `BaseCrawler` with `name = "<source>"`.
 2. Implement `async def fetch(self) -> AsyncIterator[NormalizedJob]`.
@@ -268,23 +240,21 @@ Returns `{ "sources": ["remoteok", "weworkremotely"] }`.
 
 ---
 
-## Test suite
+## 🧪 Test suite
 
-A **160-test** production suite runs on SQLite in under a second and covers:
+A **160-test** production suite runs on SQLite in under a second:
 
-| area           | file                         | highlights                                                           |
+| Area           | File                         | Highlights                                                           |
 |----------------|------------------------------|----------------------------------------------------------------------|
-| normalization  | `test_normalize*.py`         | HTML / unicode / malformed / salary edges / tz / inference           |
-| dedup          | `test_dedup*.py`             | signed/unsigned BIGINT round-trip · threshold sweeps · DB prefilter  |
-| crawlers       | `test_crawlers*.py`          | parsing · missing fields · bad dates · single-feed failure isolation |
-| base crawler   | `test_crawlers_edge.py`      | retry-then-succeed · give-up after 3 · semaphore concurrency cap     |
-| ingest         | `test_ingest*.py`            | upsert · tags storage · signed-BIGINT simhash · threshold sweeps     |
-| search         | `test_search.py`             | filter combinations · pagination boundaries · recency order          |
+| Normalization  | `test_normalize*.py`         | HTML / unicode / malformed / salary edges / tz / inference           |
+| Dedup          | `test_dedup*.py`             | signed/unsigned BIGINT round-trip · threshold sweeps · DB prefilter  |
+| Crawlers       | `test_crawlers*.py`          | parsing · missing fields · bad dates · single-feed failure isolation |
+| Base crawler   | `test_crawlers_edge.py`      | retry-then-succeed · give-up after 3 · semaphore concurrency cap     |
+| Ingest         | `test_ingest*.py`            | upsert · tags storage · signed-BIGINT simhash · threshold sweeps     |
+| Search         | `test_search.py`             | filter combinations · pagination boundaries · recency order          |
 | API            | `test_api.py`                | validation · envelope · 404s · admin dispatch mocking · OpenAPI      |
-| workers        | `test_workers.py`            | `_run_crawler` happy/empty/error · retry glue · beat schedule        |
-| schemas+config | `test_schemas_and_config.py` | Pydantic validation · env var overrides                              |
-
-Run it:
+| Workers        | `test_workers.py`            | `_run_crawler` happy/empty/error · retry glue · beat schedule        |
+| Schemas+config | `test_schemas_and_config.py` | Pydantic validation · env var overrides                              |
 
 ```bash
 uv run task test
@@ -297,9 +267,80 @@ validated by the docker-compose integration stack, not by unit tests.
 
 ---
 
-## What's deliberately out of scope
+## 🗺️ Roadmap
 
-- Per-company career-page scraping (each site is bespoke — on the Phase-2 list).
+<details>
+<summary><strong>Phase 1 — Hardening</strong> (next)</summary>
+
+- 🛠️ API key / JWT auth on `/admin/*` endpoints
+- 🛠️ Rate limiting (slowapi or reverse-proxy based)
+- 🛠️ Structured logging (structlog + request IDs)
+- 🛠️ Prometheus `/metrics` endpoint
+- 🛠️ Alembic migrations alongside the idempotent bootstrap
+- 🛠️ Pre-commit hooks (ruff + mypy)
+
+</details>
+
+<details>
+<summary><strong>Phase 2 — More sources</strong></summary>
+
+- 🛠️ Hacker News "Who's Hiring" monthly scrape
+- 🛠️ Wellfound / AngelList public listings
+- 🛠️ Lever / Greenhouse / Workable job-board APIs
+- 🛠️ Generic career-page scraper with per-company selector configs
+- 🛠️ Robots.txt + Crawl-Delay honouring per source
+
+</details>
+
+<details>
+<summary><strong>Phase 3 — Better search</strong></summary>
+
+- 🛠️ Hybrid BM25 + semantic embeddings (pgvector) for "jobs like this one"
+- 🛠️ Skill / tech-stack facets (extracted from description at ingest)
+- 🛠️ Salary normalization to annual USD + purchasing-power overlay
+- 🛠️ Company enrichment (size, sector, Glassdoor-style metadata)
+- 🛠️ Location geocoding + radius search
+- 🛠️ Saved searches → email / RSS / webhook alerts
+
+</details>
+
+<details>
+<summary><strong>Phase 4 — User-facing product</strong></summary>
+
+- 🛠️ User accounts, application tracker, kanban board
+- 🛠️ Resume-aware recommendations (embed once, rank on query)
+- 🛠️ "Hide company" / "hide keyword" personal blocklists
+- 🛠️ Browser extension: one-click save from any source page
+- 🛠️ Public Next.js front-end replacing the static MVP UI
+
+</details>
+
+<details>
+<summary><strong>Phase 5 — Scale</strong></summary>
+
+- 🛠️ Drop-in Elasticsearch / OpenSearch backend
+- 🛠️ MinHash LSH index replacing in-memory SimHash for 10M+ listings
+- 🛠️ Distributed crawl coordinator (Celery → Temporal or Arq)
+- 🛠️ Read replicas + connection pooler (pgbouncer)
+- 🛠️ S3 archival of raw crawl payloads for replay / re-normalization
+- 🛠️ Public dataset + BigQuery export
+
+</details>
+
+<details>
+<summary><strong>Phase 6 — Community</strong></summary>
+
+- 🛠️ Public demo at `demo.talash.dev`
+- 🛠️ Plugin marketplace for community crawlers
+- 🛠️ Contributor guide + issue templates + governance doc
+
+</details>
+
+---
+
+## 🚫 What's deliberately out of scope (for now)
+
+- Per-company career-page scraping (each site is bespoke — Phase 2).
 - User accounts / saved searches / alerts (Phase 4).
 - Elasticsearch (Phase 5 — Postgres FTS is enough for low millions).
 - Robots.txt / rate-limit negotiation (current sources expose public feeds
@@ -307,9 +348,11 @@ validated by the docker-compose integration stack, not by unit tests.
 
 ---
 
-## Contributing
+## 🤝 Contributing
 
-PRs welcome. Please:
+PRs welcome! Please read the [Contributing Guide](CONTRIBUTING.md) first.
+
+Quick version:
 
 - Run `uv run task lint` and `uv run task test` before pushing.
 - Never commit `.env` or anything derived from a live database.
@@ -317,7 +360,13 @@ PRs welcome. Please:
 
 ---
 
+## 📄 License
 
-## License
+[MIT](LICENSE)
 
-MIT.
+---
+
+<p align="center">
+  <strong>If Talash helped you, consider giving it a ⭐</strong><br>
+  <em>It helps others discover the project!</em>
+</p>
