@@ -27,7 +27,7 @@ services:
 
   api:
     build: .
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://jobhunt:jobhunt@postgres:5432/jobhunt
