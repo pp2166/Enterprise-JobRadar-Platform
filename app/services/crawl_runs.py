@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import CrawlRun
@@ -42,6 +43,15 @@ async def create_crawl_run(
     await session.refresh(run)
 
     return run
+
+
+async def find_crawl_run_by_task_id(
+    session: AsyncSession,
+    *,
+    celery_task_id: str,
+) -> CrawlRun | None:
+    stmt = select(CrawlRun).where(CrawlRun.celery_task_id == celery_task_id)
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def mark_crawl_run_running(

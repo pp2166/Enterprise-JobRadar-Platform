@@ -11,6 +11,7 @@ from app.models import CrawlRun
 from app.services.crawl_runs import (
     CrawlRunNotFoundError,
     create_crawl_run,
+    find_crawl_run_by_task_id,
     mark_crawl_run_failed,
     mark_crawl_run_retrying,
     mark_crawl_run_running,
@@ -107,6 +108,34 @@ async def test_create_crawl_run_persists_queued_record(session):
     assert stored.source == "remoteok"
     assert stored.status == "queued"
     assert stored.celery_task_id == "task-service-create-001"
+
+
+@pytest.mark.asyncio
+async def test_find_crawl_run_by_task_id_returns_record(session):
+    run = await create_crawl_run(
+        session,
+        source="remoteok",
+        celery_task_id="task-find-001",
+    )
+
+    found = await find_crawl_run_by_task_id(
+        session,
+        celery_task_id="task-find-001",
+    )
+
+    assert found is not None
+    assert found.id == run.id
+    assert found.celery_task_id == "task-find-001"
+
+
+@pytest.mark.asyncio
+async def test_find_crawl_run_by_task_id_returns_none_for_missing_task(session):
+    found = await find_crawl_run_by_task_id(
+        session,
+        celery_task_id="task-missing-001",
+    )
+
+    assert found is None
 
 
 @pytest.mark.asyncio

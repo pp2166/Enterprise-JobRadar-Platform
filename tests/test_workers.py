@@ -13,6 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.crawlers import registry
 from app.crawlers.base import BaseCrawler
+from app.models import CrawlRun
+from app.services.crawl_runs import create_crawl_run
 from app.services.normalize import NormalizedJob
 
 
@@ -91,27 +93,269 @@ class TestRunCrawler:
             registry._items.pop("boom", None)
 
 
+@pytest.mark.asyncio
+class TestCrawlSourceRunTracking:
+    async def test_success_marks_crawl_run_succeeded(
+        self,
+        patched_tasks,
+        stub_registry,
+        session: AsyncSession,
+    ):
+        run = await create_crawl_run(
+            session,
+            source="stub",
+            celery_task_id="task-worker-success-001",
+        )
+
+        result = await patched_tasks._run_crawler_attempt(
+            "stub",
+            task_id="task-worker-success-001",
+            retries=0,
+            max_retries=3,
+        )
+
+        assert result == {
+            "source": "stub",
+            "received": 3,
+            "inserted": 3,
+            "updated": 0,
+            "duplicates": 0,
+        }
+
+        await session.refresh(run)
+        assert run.status == "succeeded"
+        assert run.attempt_count == 1
+        assert run.started_at is not None
+        assert run.finished_at is not None
+        assert run.received == 3
+        assert run.inserted == 3
+        assert run.updated == 0
+        assert run.duplicates == 0
+
+    async def test_retryable_failure_marks_crawl_run_retrying(
+        self,
+        patched_tasks,
+        monkeypatch,
+        session: AsyncSession,
+    ):
+        run = await create_crawl_run(
+            session,
+            source="boom",
+            celery_task_id="task-worker-retry-001",
+        )
+        boom = _StubCrawler(raise_exc=RuntimeError("temporary crawler error"))
+        monkeypatch.setitem(registry._items, "boom", boom)
+        try:
+            result = await patched_tasks._run_crawler_attempt(
+                "boom",
+                task_id="task-worker-retry-001",
+                retries=0,
+                max_retries=3,
+            )
+        finally:
+            registry._items.pop("boom", None)
+
+        assert isinstance(result, patched_tasks._RetryCrawl)
+        assert "temporary crawler error" in str(result.exc)
+
+        await session.refresh(run)
+        assert run.status == "retrying"
+        assert run.attempt_count == 1
+        assert run.error_message is not None
+        assert "temporary crawler error" in run.error_message
+        assert run.finished_at is None
+
+    async def test_final_failure_marks_crawl_run_failed(
+        self,
+        patched_tasks,
+        monkeypatch,
+        session: AsyncSession,
+    ):
+        run = await create_crawl_run(
+            session,
+            source="boom",
+            celery_task_id="task-worker-failed-001",
+        )
+        boom = _StubCrawler(raise_exc=RuntimeError("permanent crawler error"))
+        monkeypatch.setitem(registry._items, "boom", boom)
+        try:
+            with pytest.raises(RuntimeError, match="permanent crawler error"):
+                await patched_tasks._run_crawler_attempt(
+                    "boom",
+                    task_id="task-worker-failed-001",
+                    retries=3,
+                    max_retries=3,
+                )
+        finally:
+            registry._items.pop("boom", None)
+
+        await session.refresh(run)
+        assert run.status == "failed"
+        assert run.attempt_count == 1
+        assert run.error_message is not None
+        assert "permanent crawler error" in run.error_message
+        assert run.finished_at is not None
+
+    async def test_second_attempt_preserves_started_at_and_succeeds(
+        self,
+        patched_tasks,
+        monkeypatch,
+        session: AsyncSession,
+        make_job,
+    ):
+        run = await create_crawl_run(
+            session,
+            source="flaky",
+            celery_task_id="task-worker-flaky-001",
+        )
+        failing = _StubCrawler(raise_exc=RuntimeError("temporary crawler error"))
+        monkeypatch.setitem(registry._items, "flaky", failing)
+
+        first = await patched_tasks._run_crawler_attempt(
+            "flaky",
+            task_id="task-worker-flaky-001",
+            retries=0,
+            max_retries=3,
+        )
+        assert isinstance(first, patched_tasks._RetryCrawl)
+
+        await session.refresh(run)
+        original_started_at = run.started_at
+        assert original_started_at is not None
+
+        succeeding = _StubCrawler(
+            jobs=[make_job(source="flaky", source_id="second-attempt")]
+        )
+        monkeypatch.setitem(registry._items, "flaky", succeeding)
+        try:
+            result = await patched_tasks._run_crawler_attempt(
+                "flaky",
+                task_id="task-worker-flaky-001",
+                retries=1,
+                max_retries=3,
+            )
+        finally:
+            registry._items.pop("flaky", None)
+
+        assert result["inserted"] == 1
+
+        await session.refresh(run)
+        assert run.status == "succeeded"
+        assert run.attempt_count == 2
+        assert run.started_at == original_started_at
+        assert run.error_message is None
+        assert run.finished_at is not None
+
+    async def test_missing_crawl_run_task_still_executes(
+        self,
+        patched_tasks,
+        monkeypatch,
+        session: AsyncSession,
+        make_job,
+    ):
+        legacy = _StubCrawler(jobs=[make_job(source="legacy", source_id="1")])
+        monkeypatch.setitem(registry._items, "legacy", legacy)
+        try:
+            result = await patched_tasks._run_crawler_attempt(
+                "legacy",
+                task_id="task-worker-missing-001",
+                retries=0,
+                max_retries=3,
+            )
+        finally:
+            registry._items.pop("legacy", None)
+
+        assert result == {
+            "source": "legacy",
+            "received": 1,
+            "inserted": 1,
+            "updated": 0,
+            "duplicates": 0,
+        }
+        assert await session.get(CrawlRun, 1) is None
+
+
 class TestCeleryTaskWrappers:
-    def test_crawl_source_retries_on_exception(self, monkeypatch):
-        """The bound task must delegate to self.retry on any failure."""
+    def test_schema_failure_still_retries(self, monkeypatch):
         from app.workers import tasks
 
-        # Replace _run_crawler with a synchronous function that raises so no
-        # un-awaited coroutine is left dangling.
-        def _boom(_source):
-            raise RuntimeError("boom")
+        async def fake_ensure_schema():
+            raise RuntimeError("database unavailable")
 
-        monkeypatch.setattr(tasks, "_run_crawler", _boom)
-        # Bypass asyncio.run since _boom is sync now.
-        monkeypatch.setattr(tasks.asyncio, "run", lambda coro: coro(None))
+        monkeypatch.setattr(tasks, "_ensure_schema", fake_ensure_schema)
+        mock_retry = MagicMock(side_effect=RuntimeError("retry-called"))
+        monkeypatch.setattr(tasks.crawl_source, "retry", mock_retry)
 
+        tasks.crawl_source.push_request(id="task-schema-retry-001", retries=0)
+        try:
+            with pytest.raises(RuntimeError, match="retry-called"):
+                tasks.crawl_source.run("remoteok")
+        finally:
+            tasks.crawl_source.pop_request()
+
+        retry_exc = mock_retry.call_args.kwargs["exc"]
+        assert isinstance(retry_exc, RuntimeError)
+        assert str(retry_exc) == "database unavailable"
+
+    def test_final_schema_failure_does_not_retry(self, monkeypatch):
+        from app.workers import tasks
+
+        async def fake_ensure_schema():
+            raise RuntimeError("database unavailable")
+
+        monkeypatch.setattr(tasks, "_ensure_schema", fake_ensure_schema)
+        mock_retry = MagicMock()
+        monkeypatch.setattr(tasks.crawl_source, "retry", mock_retry)
+
+        tasks.crawl_source.push_request(id="task-schema-final-001", retries=3)
+        try:
+            with pytest.raises(RuntimeError, match="database unavailable"):
+                tasks.crawl_source.run("remoteok")
+        finally:
+            tasks.crawl_source.pop_request()
+
+        mock_retry.assert_not_called()
+
+    def test_crawl_source_retries_when_attempt_requests_retry(self, monkeypatch):
+        """The bound task must delegate to self.retry for retryable failures."""
+        from app.workers import tasks
+
+        exc = RuntimeError("boom")
+
+        def fake_run(coro):
+            coro.close()
+            return tasks._RetryCrawl(exc=exc)
+
+        monkeypatch.setattr(tasks.asyncio, "run", fake_run)
         mock_retry = MagicMock(side_effect=RuntimeError("retry-called"))
         monkeypatch.setattr(tasks.crawl_source, "retry", mock_retry)
 
         with pytest.raises(RuntimeError, match="retry-called"):
             tasks.crawl_source.run("remoteok")
 
-        mock_retry.assert_called_once()
+        mock_retry.assert_called_once_with(exc=exc)
+
+    def test_crawl_source_reraises_final_failure_without_retry(self, monkeypatch):
+        from app.workers import tasks
+
+        exc = RuntimeError("final failure")
+
+        def fake_run(coro):
+            coro.close()
+            raise exc
+
+        monkeypatch.setattr(tasks.asyncio, "run", fake_run)
+        mock_retry = MagicMock()
+        monkeypatch.setattr(tasks.crawl_source, "retry", mock_retry)
+
+        tasks.crawl_source.push_request(id="task-final-failure-001", retries=3)
+        try:
+            with pytest.raises(RuntimeError, match="final failure"):
+                tasks.crawl_source.run("remoteok")
+        finally:
+            tasks.crawl_source.pop_request()
+
+        mock_retry.assert_not_called()
 
     def test_crawl_all_dispatches_every_registered_source(self, monkeypatch):
         from app.workers import tasks
