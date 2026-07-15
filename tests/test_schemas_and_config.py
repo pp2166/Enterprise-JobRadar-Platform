@@ -7,7 +7,14 @@ import pytest
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.schemas import CrawlRequest, CrawlResponse, CrawlRunOut, JobOut, SearchResult
+from app.schemas import (
+    CrawlRequest,
+    CrawlResponse,
+    CrawlRunListResponse,
+    CrawlRunOut,
+    JobOut,
+    SearchResult,
+)
 
 
 class TestJobOut:
@@ -135,6 +142,27 @@ class TestCrawlRequestResponse:
         dumped = run.model_dump()
         assert dumped["run_id"] == 42
         assert "id" not in dumped
+
+    def test_list_response_serializes_multiple_runs(self):
+        first = CrawlRunOut(**self._valid_run_payload(id=1, celery_task_id="task-1"))
+        second = CrawlRunOut(**self._valid_run_payload(id=2, celery_task_id="task-2"))
+
+        response = CrawlRunListResponse(
+            total=2,
+            page=1,
+            page_size=20,
+            runs=[first, second],
+        )
+
+        assert response.model_dump() == {
+            "total": 2,
+            "page": 1,
+            "page_size": 20,
+            "runs": [
+                first.model_dump(),
+                second.model_dump(),
+            ],
+        }
 
 
 class TestSettings:

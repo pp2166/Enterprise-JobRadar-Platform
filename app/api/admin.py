@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+from typing import Annotated
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crawlers import registry
 from app.database import get_session
-from app.schemas import CrawlRequest, CrawlResponse, CrawlRunOut
-from app.services.crawl_runs import create_crawl_run, mark_crawl_run_failed
+from app.schemas import CrawlRequest, CrawlResponse, CrawlRunListResponse, CrawlRunOut
+from app.services.crawl_runs import (
+    CrawlRunNotFoundError,
+    create_crawl_run,
+    get_crawl_run,
+    list_crawl_runs,
+    mark_crawl_run_failed,
+)
 from app.workers.tasks import crawl_source
 
 router = APIRouter()
@@ -17,6 +24,46 @@ router = APIRouter()
 @router.get("/sources")
 async def list_sources() -> dict:
     return {"sources": registry.names()}
+
+
+@router.get("/crawl-runs", response_model=CrawlRunListResponse)
+async def list_admin_crawl_runs(
+    source: str | None = None,
+    status: str | None = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    session: AsyncSession = Depends(get_session),
+) -> CrawlRunListResponse:
+    result = await list_crawl_runs(
+        session,
+        source=source,
+        status=status,
+        page=page,
+        page_size=page_size,
+    )
+
+    return CrawlRunListResponse(
+        total=result.total,
+        page=page,
+        page_size=page_size,
+        runs=[CrawlRunOut.model_validate(run) for run in result.records],
+    )
+
+
+@router.get("/crawl-runs/{run_id}", response_model=CrawlRunOut)
+async def get_admin_crawl_run(
+    run_id: int,
+    session: AsyncSession = Depends(get_session),
+) -> CrawlRunOut:
+    try:
+        run = await get_crawl_run(
+            session,
+            run_id=run_id,
+        )
+    except CrawlRunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return CrawlRunOut.model_validate(run)
 
 
 @router.post("/crawl", response_model=CrawlResponse)

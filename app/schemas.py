@@ -58,3 +58,10 @@ class CrawlRunOut(BaseModel):
 class CrawlResponse(BaseModel):
     dispatched: list[str]
     runs: list[CrawlRunOut] = Field(default_factory=list)
+
+
+class CrawlRunListResponse(BaseModel):
+    total: int
+    page: int
+    page_size: int
+    runs: list[CrawlRunOut]
