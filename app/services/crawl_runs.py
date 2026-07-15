@@ -86,3 +86,39 @@ async def mark_crawl_run_succeeded(
     await session.refresh(run)
 
     return run
+
+
+async def mark_crawl_run_retrying(
+    session: AsyncSession,
+    *,
+    run_id: int,
+    error_message: str,
+) -> CrawlRun:
+    run = await _get_crawl_run(session, run_id)
+
+    run.status = "retrying"
+    run.error_message = error_message
+    run.finished_at = None
+
+    await session.commit()
+    await session.refresh(run)
+
+    return run
+
+
+async def mark_crawl_run_failed(
+    session: AsyncSession,
+    *,
+    run_id: int,
+    error_message: str,
+) -> CrawlRun:
+    run = await _get_crawl_run(session, run_id)
+
+    run.status = "failed"
+    run.error_message = error_message
+    run.finished_at = datetime.now(timezone.utc)
+
+    await session.commit()
+    await session.refresh(run)
+
+    return run

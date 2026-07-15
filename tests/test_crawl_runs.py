@@ -11,6 +11,8 @@ from app.models import CrawlRun
 from app.services.crawl_runs import (
     CrawlRunNotFoundError,
     create_crawl_run,
+    mark_crawl_run_failed,
+    mark_crawl_run_retrying,
     mark_crawl_run_running,
     mark_crawl_run_succeeded,
 )
@@ -77,6 +79,8 @@ async def test_crawl_run_persists_success_result(session):
     assert stored.updated == 5
     assert stored.duplicates == 5
     assert stored.error_message is None
+    assert stored.started_at is not None
+    assert stored.finished_at is not None
 
 
 @pytest.mark.asyncio
@@ -129,6 +133,18 @@ async def test_mark_crawl_run_running_updates_state(session):
     assert stored.status == "running"
     assert stored.attempt_count == 1
     assert stored.started_at is not None
+
+
+@pytest.mark.asyncio
+async def test_mark_crawl_run_running_rejects_missing_run(session):
+    with pytest.raises(
+        CrawlRunNotFoundError,
+        match="crawl run not found: 999999",
+    ):
+        await mark_crawl_run_running(
+            session,
+            run_id=999999,
+        )
 
 
 @pytest.mark.asyncio
@@ -188,13 +204,96 @@ async def test_mark_crawl_run_succeeded_rejects_missing_run(session):
             duplicates=0,
         )
 
+
 @pytest.mark.asyncio
-async def test_mark_crawl_run_running_rejects_missing_run(session):
+async def test_mark_crawl_run_retrying_records_error(session):
+    run = await create_crawl_run(
+        session,
+        source="remoteok",
+        celery_task_id="task-retrying-001",
+    )
+    await mark_crawl_run_running(
+        session,
+        run_id=run.id,
+    )
+
+    retrying = await mark_crawl_run_retrying(
+        session,
+        run_id=run.id,
+        error_message="temporary network error",
+    )
+
+    assert retrying.status == "retrying"
+    assert retrying.attempt_count == 1
+    assert retrying.error_message == "temporary network error"
+    assert retrying.started_at is not None
+    assert retrying.finished_at is None
+
+    original_started_at = retrying.started_at
+
+    running_again = await mark_crawl_run_running(
+        session,
+        run_id=run.id,
+    )
+
+    assert running_again.status == "running"
+    assert running_again.attempt_count == 2
+    assert running_again.started_at == original_started_at
+
+
+@pytest.mark.asyncio
+async def test_mark_crawl_run_retrying_rejects_missing_run(session):
     with pytest.raises(
         CrawlRunNotFoundError,
         match="crawl run not found: 999999",
     ):
-        await mark_crawl_run_running(
+        await mark_crawl_run_retrying(
             session,
             run_id=999999,
+            error_message="temporary failure",
+        )
+
+
+@pytest.mark.asyncio
+async def test_mark_crawl_run_failed_records_final_error(session):
+    run = await create_crawl_run(
+        session,
+        source="remoteok",
+        celery_task_id="task-failed-001",
+    )
+    await mark_crawl_run_running(
+        session,
+        run_id=run.id,
+    )
+
+    failed = await mark_crawl_run_failed(
+        session,
+        run_id=run.id,
+        error_message="maximum retries exceeded",
+    )
+
+    assert failed.status == "failed"
+    assert failed.attempt_count == 1
+    assert failed.error_message == "maximum retries exceeded"
+    assert failed.started_at is not None
+    assert failed.finished_at is not None
+
+    stored = await session.get(CrawlRun, run.id)
+
+    assert stored is not None
+    assert stored.status == "failed"
+    assert stored.error_message == "maximum retries exceeded"
+    assert stored.finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_mark_crawl_run_failed_rejects_missing_run(session):
+    with pytest.raises(
+        CrawlRunNotFoundError,
+        match="crawl run not found: 999999",
+    ):
+        await mark_crawl_run_failed(
+            session,
+            run_id=999999,
+            error_message="final failure",
         )
