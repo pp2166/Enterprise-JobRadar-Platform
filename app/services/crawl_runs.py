@@ -2,9 +2,27 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import CrawlRun
+
+
+class CrawlRunNotFoundError(LookupError):
+    """Raised when a crawl run does not exist."""
+
+
+async def _get_crawl_run(
+    session: AsyncSession,
+    run_id: int,
+) -> CrawlRun:
+    run = await session.get(CrawlRun, run_id)
+
+    if run is None:
+        raise CrawlRunNotFoundError(f"crawl run not found: {run_id}")
+
+    return run
 
 
 async def create_crawl_run(
@@ -20,6 +38,25 @@ async def create_crawl_run(
     )
 
     session.add(run)
+    await session.commit()
+    await session.refresh(run)
+
+    return run
+
+
+async def mark_crawl_run_running(
+    session: AsyncSession,
+    *,
+    run_id: int,
+) -> CrawlRun:
+    run = await _get_crawl_run(session, run_id)
+
+    run.status = "running"
+    run.attempt_count += 1
+
+    if run.started_at is None:
+        run.started_at = datetime.now(timezone.utc)
+
     await session.commit()
     await session.refresh(run)
 
