@@ -61,3 +61,28 @@ async def mark_crawl_run_running(
     await session.refresh(run)
 
     return run
+
+
+async def mark_crawl_run_succeeded(
+    session: AsyncSession,
+    *,
+    run_id: int,
+    received: int,
+    inserted: int,
+    updated: int,
+    duplicates: int,
+) -> CrawlRun:
+    run = await _get_crawl_run(session, run_id)
+
+    run.status = "succeeded"
+    run.received = received
+    run.inserted = inserted
+    run.updated = updated
+    run.duplicates = duplicates
+    run.error_message = None
+    run.finished_at = datetime.now(timezone.utc)
+
+    await session.commit()
+    await session.refresh(run)
+
+    return run

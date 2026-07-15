@@ -12,6 +12,7 @@ from app.services.crawl_runs import (
     CrawlRunNotFoundError,
     create_crawl_run,
     mark_crawl_run_running,
+    mark_crawl_run_succeeded,
 )
 
 
@@ -129,6 +130,63 @@ async def test_mark_crawl_run_running_updates_state(session):
     assert stored.attempt_count == 1
     assert stored.started_at is not None
 
+
+@pytest.mark.asyncio
+async def test_mark_crawl_run_succeeded_persists_stats(session):
+    run = await create_crawl_run(
+        session,
+        source="remoteok",
+        celery_task_id="task-succeeded-001",
+    )
+    await mark_crawl_run_running(
+        session,
+        run_id=run.id,
+    )
+
+    succeeded = await mark_crawl_run_succeeded(
+        session,
+        run_id=run.id,
+        received=100,
+        inserted=90,
+        updated=5,
+        duplicates=5,
+    )
+
+    assert succeeded.status == "succeeded"
+    assert succeeded.attempt_count == 1
+    assert succeeded.received == 100
+    assert succeeded.inserted == 90
+    assert succeeded.updated == 5
+    assert succeeded.duplicates == 5
+    assert succeeded.error_message is None
+    assert succeeded.started_at is not None
+    assert succeeded.finished_at is not None
+
+    stored = await session.get(CrawlRun, run.id)
+
+    assert stored is not None
+    assert stored.status == "succeeded"
+    assert stored.received == 100
+    assert stored.inserted == 90
+    assert stored.updated == 5
+    assert stored.duplicates == 5
+    assert stored.finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_mark_crawl_run_succeeded_rejects_missing_run(session):
+    with pytest.raises(
+        CrawlRunNotFoundError,
+        match="crawl run not found: 999999",
+    ):
+        await mark_crawl_run_succeeded(
+            session,
+            run_id=999999,
+            received=0,
+            inserted=0,
+            updated=0,
+            duplicates=0,
+        )
 
 @pytest.mark.asyncio
 async def test_mark_crawl_run_running_rejects_missing_run(session):
