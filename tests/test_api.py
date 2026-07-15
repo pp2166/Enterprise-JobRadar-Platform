@@ -11,10 +11,13 @@ from collections.abc import AsyncIterator
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.crawlers import registry
 from app.database import get_session
 from app.main import app
+from app.models import CrawlRun
 from app.services.ingest import ingest_jobs
 
 
@@ -145,40 +148,136 @@ class TestAdminEndpoints:
         names = r.json()["sources"]
         assert "remoteok" in names and "weworkremotely" in names
 
-    async def test_crawl_unknown_source_rejected(self, client: AsyncClient):
+    async def test_crawl_unknown_source_rejected(
+        self,
+        client: AsyncClient,
+        monkeypatch,
+        session: AsyncSession,
+    ):
+        dispatched: list[tuple[list[str], str]] = []
+        monkeypatch.setattr(
+            "app.api.admin.crawl_source.apply_async",
+            lambda args, task_id: dispatched.append((args, task_id)),
+        )
+
         r = await client.post("/admin/crawl", json={"source": "not-real"})
         assert r.status_code == 400
         assert "unknown source" in r.json()["detail"]
+        assert dispatched == []
 
-    async def test_crawl_specific_source_dispatches(self, client: AsyncClient, monkeypatch):
-        dispatched: list[str] = []
+        runs = (await session.scalars(select(CrawlRun))).all()
+        assert runs == []
 
-        def fake_delay(name):  # mimic celery task.delay signature
-            dispatched.append(name)
+    async def test_crawl_specific_source_dispatches(
+        self,
+        client: AsyncClient,
+        monkeypatch,
+        session: AsyncSession,
+    ):
+        dispatched: list[tuple[list[str], str]] = []
 
-        monkeypatch.setattr("app.api.admin.crawl_source.delay", fake_delay)
+        def fake_apply_async(args, task_id):
+            dispatched.append((args, task_id))
+
+        monkeypatch.setattr("app.api.admin.crawl_source.apply_async", fake_apply_async)
         r = await client.post("/admin/crawl", json={"source": "remoteok"})
         assert r.status_code == 200
-        assert r.json() == {
-            "dispatched": ["remoteok"],
-            "runs": [],
-        }
-        assert dispatched == ["remoteok"]
+        body = r.json()
+        assert body["dispatched"] == ["remoteok"]
+        assert len(body["runs"]) == 1
 
-    async def test_crawl_all_when_source_omitted(self, client: AsyncClient, monkeypatch):
-        dispatched: list[str] = []
+        run = body["runs"][0]
+        assert run["source"] == "remoteok"
+        assert run["status"] == "queued"
+        assert run["attempt_count"] == 0
+        assert isinstance(run["run_id"], int)
+        assert dispatched == [(["remoteok"], run["celery_task_id"])]
+
+        db_run = await session.get(CrawlRun, run["run_id"])
+        assert db_run is not None
+        assert db_run.source == "remoteok"
+        assert db_run.status == "queued"
+        assert db_run.celery_task_id == run["celery_task_id"]
+
+    async def test_crawl_specific_source_returns_queued_run_defaults(
+        self,
+        client: AsyncClient,
+        monkeypatch,
+    ):
         monkeypatch.setattr(
-            "app.api.admin.crawl_source.delay",
-            lambda name: dispatched.append(name),
+            "app.api.admin.crawl_source.apply_async",
+            lambda args, task_id: None,
         )
+
+        r = await client.post("/admin/crawl", json={"source": "remoteok"})
+        assert r.status_code == 200
+        run = r.json()["runs"][0]
+        assert run["received"] == 0
+        assert run["inserted"] == 0
+        assert run["updated"] == 0
+        assert run["duplicates"] == 0
+        assert run["error_message"] is None
+        assert run["created_at"] is not None
+        assert run["started_at"] is None
+        assert run["finished_at"] is None
+
+    async def test_crawl_all_when_source_omitted(
+        self,
+        client: AsyncClient,
+        monkeypatch,
+        session: AsyncSession,
+    ):
+        dispatched: list[tuple[list[str], str]] = []
+
+        def fake_apply_async(args, task_id):
+            dispatched.append((args, task_id))
+
+        monkeypatch.setattr("app.api.admin.crawl_source.apply_async", fake_apply_async)
         r = await client.post("/admin/crawl", json={})
         assert r.status_code == 200
         body = r.json()
-        assert set(body["dispatched"]) == set(dispatched)
-        assert "remoteok" in dispatched and "weworkremotely" in dispatched
+        source_names = registry.names()
+        task_ids = [task_id for _, task_id in dispatched]
+
+        assert set(body["dispatched"]) == set(source_names)
+        assert [args[0] for args, _ in dispatched] == source_names
+        assert len(task_ids) == len(set(task_ids))
+        assert len(body["runs"]) == len(source_names)
+        assert {run["source"] for run in body["runs"]} == set(source_names)
+        assert {run["status"] for run in body["runs"]} == {"queued"}
+
+        runs = (await session.scalars(select(CrawlRun))).all()
+        assert len(runs) == len(source_names)
+        assert {run.source for run in runs} == set(source_names)
+
+    async def test_crawl_dispatch_failure_marks_run_failed(
+        self,
+        client: AsyncClient,
+        monkeypatch,
+        session: AsyncSession,
+    ):
+        def fake_apply_async(args, task_id):
+            raise RuntimeError("broker unavailable")
+
+        monkeypatch.setattr("app.api.admin.crawl_source.apply_async", fake_apply_async)
+        r = await client.post("/admin/crawl", json={"source": "remoteok"})
+        assert r.status_code == 503
+        assert r.json()["detail"] == "failed to dispatch source: remoteok"
+
+        runs = (await session.scalars(select(CrawlRun))).all()
+        assert len(runs) == 1
+        run = runs[0]
+        assert run.source == "remoteok"
+        assert run.status == "failed"
+        assert run.error_message is not None
+        assert "broker unavailable" in run.error_message
+        assert run.finished_at is not None
 
     async def test_crawl_payload_is_optional(self, client: AsyncClient, monkeypatch):
-        monkeypatch.setattr("app.api.admin.crawl_source.delay", lambda _: None)
+        monkeypatch.setattr(
+            "app.api.admin.crawl_source.apply_async",
+            lambda args, task_id: None,
+        )
         # Missing body is also fine — CrawlRequest has all-optional fields.
         r = await client.post("/admin/crawl", json={})
         assert r.status_code == 200
