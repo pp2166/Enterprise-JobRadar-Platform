@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class JobOut(BaseModel):
@@ -37,5 +37,24 @@ class CrawlRequest(BaseModel):
     source: str | None = None
 
 
+class CrawlRunOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    run_id: int = Field(validation_alias="id")
+    source: str
+    status: str
+    celery_task_id: str
+    attempt_count: int
+    received: int
+    inserted: int
+    updated: int
+    duplicates: int
+    error_message: str | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
 class CrawlResponse(BaseModel):
     dispatched: list[str]
+    runs: list[CrawlRunOut] = Field(default_factory=list)

@@ -159,7 +159,10 @@ class TestAdminEndpoints:
         monkeypatch.setattr("app.api.admin.crawl_source.delay", fake_delay)
         r = await client.post("/admin/crawl", json={"source": "remoteok"})
         assert r.status_code == 200
-        assert r.json() == {"dispatched": ["remoteok"]}
+        assert r.json() == {
+            "dispatched": ["remoteok"],
+            "runs": [],
+        }
         assert dispatched == ["remoteok"]
 
     async def test_crawl_all_when_source_omitted(self, client: AsyncClient, monkeypatch):
