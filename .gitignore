@@ -66,6 +66,8 @@ secrets.yml
 *.db
 *.sqlite
 *.sqlite3
+celerybeat-schedule
+celerybeat-schedule.*
 pgdata/
 postgres-data/
 redis-data/

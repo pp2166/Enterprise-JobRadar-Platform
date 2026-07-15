@@ -9,8 +9,8 @@ JobRadar 是一个基于 FastAPI、Celery、Redis 和 PostgreSQL 的分布式岗
 ## 当前仓库
 
 - 本地目录：D:\CrawlerOps\upstream-talash
-- 当前分支：feat/crawl-run-records
-- 当前冻结点：d5a25af
+- 当前分支：main
+- 当前冻结点：33aff5a
 - origin：https://github.com/pp2166/Enterprise-JobRadar-Platform
 - upstream：https://github.com/iamrahulroyy/talash
 
@@ -31,6 +31,8 @@ JobRadar 是一个基于 FastAPI、Celery、Redis 和 PostgreSQL 的分布式岗
 ## CrawlRun 第一阶段
 
 CrawlRun 第一阶段已完成。
+
+CrawlRun 第一阶段已经合并并推送至 origin/main。
 
 当前已支持：
 
@@ -55,7 +57,7 @@ CrawlRun 第一阶段已完成。
 - Ruff：通过
 - git diff --check：通过
 - Docker RemoteOK E2E：通过
-- 当前冻结点：d5a25af
+- 当前冻结点：33aff5a
 
 Docker RemoteOK E2E 验收结果：
 
