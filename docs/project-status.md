@@ -9,8 +9,8 @@ JobRadar 是一个基于 FastAPI、Celery、Redis 和 PostgreSQL 的分布式岗
 ## 当前仓库
 
 - 本地目录：D:\CrawlerOps\upstream-talash
-- 当前分支：main
-- 当前冻结点：33aff5a
+- 当前分支：feat/failure-task-management
+- 当前冻结点：4e218c7
 - origin：https://github.com/pp2166/Enterprise-JobRadar-Platform
 - upstream：https://github.com/iamrahulroyy/talash
 
@@ -77,6 +77,8 @@ Docker RemoteOK E2E 验收结果：
 
 下一阶段聚焦失败任务管理：
 
+- 当前阶段：Failure Task Management 设计
+- 下一小步：2A 数据模型字段与迁移
 - 手动重试
 - 同源任务防重
 - 超时
