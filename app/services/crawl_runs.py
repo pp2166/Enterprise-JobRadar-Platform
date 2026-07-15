@@ -21,6 +21,13 @@ class CrawlRunNotFoundError(LookupError):
     """Raised when a crawl run does not exist."""
 
 
+class CrawlRunNotRetryableError(ValueError):
+    def __init__(self, *, run_id: int, status: str) -> None:
+        self.run_id = run_id
+        self.status = status
+        super().__init__(f"crawl run is not retryable: {run_id}")
+
+
 async def _get_crawl_run(
     session: AsyncSession,
     run_id: int,
@@ -39,6 +46,26 @@ async def get_crawl_run(
     run_id: int,
 ) -> CrawlRun:
     return await _get_crawl_run(session, run_id)
+
+
+async def create_retry_crawl_run(
+    session: AsyncSession,
+    *,
+    run_id: int,
+    celery_task_id: str,
+) -> CrawlRun:
+    parent = await _get_crawl_run(session, run_id)
+
+    if parent.status != "failed":
+        raise CrawlRunNotRetryableError(run_id=parent.id, status=parent.status)
+
+    return await create_crawl_run(
+        session,
+        source=parent.source,
+        celery_task_id=celery_task_id,
+        trigger_type="manual",
+        retry_of_run_id=parent.id,
+    )
 
 
 async def create_crawl_run(

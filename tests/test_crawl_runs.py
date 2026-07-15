@@ -10,7 +10,9 @@ from sqlalchemy import select
 from app.models import CrawlRun
 from app.services.crawl_runs import (
     CrawlRunNotFoundError,
+    CrawlRunNotRetryableError,
     create_crawl_run,
+    create_retry_crawl_run,
     find_crawl_run_by_task_id,
     get_crawl_run,
     list_crawl_runs,
@@ -37,6 +39,58 @@ async def _create_list_run(
     )
     session.add(run)
     await session.commit()
+    await session.refresh(run)
+    return run
+
+
+async def _create_run_with_status(
+    session,
+    *,
+    status: str,
+    celery_task_id: str,
+) -> CrawlRun:
+    run = await create_crawl_run(
+        session,
+        source="remoteok",
+        celery_task_id=celery_task_id,
+    )
+
+    if status == "queued":
+        return run
+
+    await mark_crawl_run_running(
+        session,
+        run_id=run.id,
+    )
+
+    if status == "running":
+        await session.refresh(run)
+        return run
+
+    if status == "retrying":
+        await mark_crawl_run_retrying(
+            session,
+            run_id=run.id,
+            error_message="temporary error",
+        )
+    elif status == "succeeded":
+        await mark_crawl_run_succeeded(
+            session,
+            run_id=run.id,
+            received=10,
+            inserted=7,
+            updated=2,
+            duplicates=1,
+        )
+    elif status == "failed":
+        await mark_crawl_run_failed(
+            session,
+            run_id=run.id,
+            error_message="final error",
+        )
+    else:
+        raise ValueError(f"unknown status: {status}")
+
     await session.refresh(run)
     return run
 
@@ -251,6 +305,131 @@ async def test_get_crawl_run_rejects_missing_run(session):
             session,
             run_id=999999,
         )
+
+
+@pytest.mark.asyncio
+async def test_create_retry_crawl_run_creates_manual_child_from_failed_parent(session):
+    parent = await _create_run_with_status(
+        session,
+        status="failed",
+        celery_task_id="task-retry-parent-001",
+    )
+    original = {
+        "id": parent.id,
+        "source": parent.source,
+        "status": parent.status,
+        "celery_task_id": parent.celery_task_id,
+        "trigger_type": parent.trigger_type,
+        "retry_of_run_id": parent.retry_of_run_id,
+        "attempt_count": parent.attempt_count,
+        "error_message": parent.error_message,
+        "finished_at": parent.finished_at,
+    }
+
+    retry = await create_retry_crawl_run(
+        session,
+        run_id=parent.id,
+        celery_task_id="task-retry-child-001",
+    )
+
+    assert retry.id != parent.id
+    assert retry.source == parent.source
+    assert retry.status == "queued"
+    assert retry.trigger_type == "manual"
+    assert retry.retry_of_run_id == parent.id
+    assert retry.celery_task_id == "task-retry-child-001"
+
+    await session.refresh(parent)
+    assert {
+        "id": parent.id,
+        "source": parent.source,
+        "status": parent.status,
+        "celery_task_id": parent.celery_task_id,
+        "trigger_type": parent.trigger_type,
+        "retry_of_run_id": parent.retry_of_run_id,
+        "attempt_count": parent.attempt_count,
+        "error_message": parent.error_message,
+        "finished_at": parent.finished_at,
+    } == original
+
+    records = (await session.scalars(select(CrawlRun))).all()
+    assert {run.id for run in records} == {parent.id, retry.id}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["queued", "running", "retrying", "succeeded"])
+async def test_create_retry_crawl_run_rejects_non_failed_statuses(session, status):
+    run = await _create_run_with_status(
+        session,
+        status=status,
+        celery_task_id=f"task-retry-not-allowed-{status}",
+    )
+
+    with pytest.raises(
+        CrawlRunNotRetryableError,
+        match=f"crawl run is not retryable: {run.id}",
+    ) as exc_info:
+        await create_retry_crawl_run(
+            session,
+            run_id=run.id,
+            celery_task_id=f"task-retry-not-allowed-child-{status}",
+        )
+
+    assert exc_info.value.run_id == run.id
+    assert exc_info.value.status == status
+
+
+@pytest.mark.asyncio
+async def test_create_retry_crawl_run_rejects_missing_parent(session):
+    with pytest.raises(
+        CrawlRunNotFoundError,
+        match="crawl run not found: 999999",
+    ):
+        await create_retry_crawl_run(
+            session,
+            run_id=999999,
+            celery_task_id="task-retry-missing-parent-001",
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_retry_crawl_run_uses_direct_parent_for_retry_chain(session):
+    original = await _create_run_with_status(
+        session,
+        status="failed",
+        celery_task_id="task-retry-chain-original-001",
+    )
+    first_retry = await create_retry_crawl_run(
+        session,
+        run_id=original.id,
+        celery_task_id="task-retry-chain-first-001",
+    )
+    await mark_crawl_run_running(
+        session,
+        run_id=first_retry.id,
+    )
+    await mark_crawl_run_failed(
+        session,
+        run_id=first_retry.id,
+        error_message="manual retry failed",
+    )
+
+    second_retry = await create_retry_crawl_run(
+        session,
+        run_id=first_retry.id,
+        celery_task_id="task-retry-chain-second-001",
+    )
+
+    assert first_retry.retry_of_run_id == original.id
+    assert second_retry.retry_of_run_id == first_retry.id
+    assert second_retry.retry_of_run_id != original.id
+
+    stored = (await session.scalars(select(CrawlRun))).all()
+    assert {run.id for run in stored} == {
+        original.id,
+        first_retry.id,
+        second_retry.id,
+    }
 
 
 @pytest.mark.asyncio
