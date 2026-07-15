@@ -7,7 +7,14 @@ import pytest
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.schemas import CrawlRequest, CrawlResponse, JobOut, SearchResult
+from app.schemas import (
+    CrawlRequest,
+    CrawlResponse,
+    CrawlRunListResponse,
+    CrawlRunOut,
+    JobOut,
+    SearchResult,
+)
 
 
 class TestJobOut:
@@ -84,6 +91,25 @@ class TestSearchResult:
 
 
 class TestCrawlRequestResponse:
+    def _valid_run_payload(self, **overrides) -> dict:
+        data = {
+            "id": 42,
+            "source": "remoteok",
+            "status": "succeeded",
+            "celery_task_id": "task-1",
+            "attempt_count": 2,
+            "received": 10,
+            "inserted": 7,
+            "updated": 2,
+            "duplicates": 1,
+            "error_message": None,
+            "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+            "started_at": datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
+            "finished_at": datetime(2026, 1, 1, 0, 2, tzinfo=timezone.utc),
+        }
+        data.update(overrides)
+        return data
+
     def test_request_source_optional(self):
         assert CrawlRequest().source is None
         assert CrawlRequest(source="remoteok").source == "remoteok"
@@ -93,6 +119,50 @@ class TestCrawlRequestResponse:
         assert CrawlResponse(dispatched=["a", "b"]).dispatched == ["a", "b"]
         with pytest.raises(ValidationError):
             CrawlResponse(dispatched="a")  # type: ignore[arg-type]
+
+    def test_response_defaults_runs_to_empty_list(self):
+        response = CrawlResponse(dispatched=["task-1"])
+        assert response.runs == []
+        assert response.model_dump() == {
+            "dispatched": ["task-1"],
+            "runs": [],
+        }
+
+    def test_run_out_uses_id_as_run_id(self):
+        run = CrawlRunOut(**self._valid_run_payload())
+        assert run.run_id == 42
+
+    def test_response_can_include_runs(self):
+        run = CrawlRunOut(**self._valid_run_payload(id=7))
+        response = CrawlResponse(dispatched=["task-1"], runs=[run])
+        assert response.runs[0].run_id == 7
+
+    def test_run_dump_contains_run_id_not_id(self):
+        run = CrawlRunOut(**self._valid_run_payload())
+        dumped = run.model_dump()
+        assert dumped["run_id"] == 42
+        assert "id" not in dumped
+
+    def test_list_response_serializes_multiple_runs(self):
+        first = CrawlRunOut(**self._valid_run_payload(id=1, celery_task_id="task-1"))
+        second = CrawlRunOut(**self._valid_run_payload(id=2, celery_task_id="task-2"))
+
+        response = CrawlRunListResponse(
+            total=2,
+            page=1,
+            page_size=20,
+            runs=[first, second],
+        )
+
+        assert response.model_dump() == {
+            "total": 2,
+            "page": 1,
+            "page_size": 20,
+            "runs": [
+                first.model_dump(),
+                second.model_dump(),
+            ],
+        }
 
 
 class TestSettings:

@@ -2,17 +2,31 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 
 from app.crawlers import registry
 from app.database import AsyncSessionLocal
 from app.schema import init_schema
-from app.services.ingest import ingest_jobs
+from app.services.crawl_runs import (
+    create_crawl_run,
+    find_crawl_run_by_task_id,
+    mark_crawl_run_failed,
+    mark_crawl_run_retrying,
+    mark_crawl_run_running,
+    mark_crawl_run_succeeded,
+)
+from app.services.ingest import IngestStats, ingest_jobs
 from app.services.normalize import NormalizedJob
 from app.workers.celery_app import celery_app
 
 log = logging.getLogger(__name__)
 
 _schema_ready = False
+
+
+@dataclass(frozen=True)
+class _RetryCrawl:
+    exc: Exception
 
 
 async def _ensure_schema() -> None:
@@ -23,18 +37,7 @@ async def _ensure_schema() -> None:
     _schema_ready = True
 
 
-async def _run_crawler(name: str) -> dict:
-    await _ensure_schema()
-    crawler = registry.get(name)
-    jobs: list[NormalizedJob] = []
-    async for nj in crawler.fetch():
-        jobs.append(nj)
-
-    log.info("crawler %s produced %d jobs", name, len(jobs))
-
-    async with AsyncSessionLocal() as session:
-        stats = await ingest_jobs(session, jobs)
-
+def _stats_result(name: str, stats: IngestStats) -> dict:
     return {
         "source": name,
         "received": stats.received,
@@ -44,13 +47,113 @@ async def _run_crawler(name: str) -> dict:
     }
 
 
+async def _crawl_and_ingest(name: str, session) -> dict:
+    crawler = registry.get(name)
+    jobs: list[NormalizedJob] = []
+    async for nj in crawler.fetch():
+        jobs.append(nj)
+
+    log.info("crawler %s produced %d jobs", name, len(jobs))
+
+    stats = await ingest_jobs(session, jobs)
+    return _stats_result(name, stats)
+
+
+async def _run_crawler(name: str) -> dict:
+    await _ensure_schema()
+    async with AsyncSessionLocal() as session:
+        return await _crawl_and_ingest(name, session)
+
+
+async def _run_crawler_attempt(
+    name: str,
+    *,
+    task_id: str | None,
+    retries: int,
+    max_retries: int,
+) -> dict | _RetryCrawl:
+    await _ensure_schema()
+
+    async with AsyncSessionLocal() as session:
+        run = None
+        run_id = None
+        if task_id is not None:
+            run = await find_crawl_run_by_task_id(
+                session,
+                celery_task_id=task_id,
+            )
+            if run is None:
+                run = await create_crawl_run(
+                    session,
+                    source=name,
+                    celery_task_id=task_id,
+                )
+
+        if run is not None:
+            run_id = run.id
+            run = await mark_crawl_run_running(
+                session,
+                run_id=run_id,
+            )
+
+        try:
+            result = await _crawl_and_ingest(name, session)
+        except Exception as exc:
+            log.exception("crawl %s failed", name)
+            await session.rollback()
+
+            if retries < max_retries:
+                if run_id is not None:
+                    await mark_crawl_run_retrying(
+                        session,
+                        run_id=run_id,
+                        error_message=str(exc),
+                    )
+                return _RetryCrawl(exc=exc)
+
+            if run_id is not None:
+                await mark_crawl_run_failed(
+                    session,
+                    run_id=run_id,
+                    error_message=str(exc),
+                )
+            raise
+
+        if run_id is not None:
+            await mark_crawl_run_succeeded(
+                session,
+                run_id=run_id,
+                received=result["received"],
+                inserted=result["inserted"],
+                updated=result["updated"],
+                duplicates=result["duplicates"],
+            )
+
+        return result
+
+
 @celery_app.task(name="app.workers.tasks.crawl_source", bind=True, max_retries=3, default_retry_delay=60)
 def crawl_source(self, source: str) -> dict:
     try:
-        return asyncio.run(_run_crawler(source))
+        result = asyncio.run(
+            _run_crawler_attempt(
+                source,
+                task_id=self.request.id,
+                retries=self.request.retries,
+                max_retries=self.max_retries,
+            )
+        )
     except Exception as exc:
-        log.exception("crawl %s failed", source)
-        raise self.retry(exc=exc)
+        log.exception("crawl %s attempt failed", source)
+
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc)
+
+        raise
+
+    if isinstance(result, _RetryCrawl):
+        raise self.retry(exc=result.exc)
+    return result
 
 
 @celery_app.task(name="app.workers.tasks.crawl_all")

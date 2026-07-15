@@ -8,13 +8,17 @@ created directly by the sqlite_engine fixture.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.crawlers import registry
 from app.database import get_session
 from app.main import app
+from app.models import CrawlRun
 from app.services.ingest import ingest_jobs
 
 
@@ -48,6 +52,26 @@ async def seeded(sqlite_engine, make_job):
             make_job(source="weworkremotely", source_id="3",
                      title="Staff Frontend Engineer", company="Gamma"),
         ])
+
+
+async def _create_crawl_run(
+    session: AsyncSession,
+    *,
+    source: str,
+    status: str,
+    celery_task_id: str,
+    created_at: datetime,
+) -> CrawlRun:
+    run = CrawlRun(
+        source=source,
+        status=status,
+        celery_task_id=celery_task_id,
+        created_at=created_at,
+    )
+    session.add(run)
+    await session.commit()
+    await session.refresh(run)
+    return run
 
 
 @pytest.mark.asyncio
@@ -145,37 +169,362 @@ class TestAdminEndpoints:
         names = r.json()["sources"]
         assert "remoteok" in names and "weworkremotely" in names
 
-    async def test_crawl_unknown_source_rejected(self, client: AsyncClient):
+    async def test_list_crawl_runs_empty_result(self, client: AsyncClient):
+        r = await client.get("/admin/crawl-runs")
+        assert r.status_code == 200
+        assert r.json() == {
+            "total": 0,
+            "page": 1,
+            "page_size": 20,
+            "runs": [],
+        }
+
+    async def test_list_crawl_runs_orders_by_created_at_then_id_desc(
+        self,
+        client: AsyncClient,
+        session: AsyncSession,
+    ):
+        older = await _create_crawl_run(
+            session,
+            source="remoteok",
+            status="queued",
+            celery_task_id="task-api-list-order-001",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        newer_first = await _create_crawl_run(
+            session,
+            source="remoteok",
+            status="running",
+            celery_task_id="task-api-list-order-002",
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+        newer_second = await _create_crawl_run(
+            session,
+            source="weworkremotely",
+            status="succeeded",
+            celery_task_id="task-api-list-order-003",
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+
+        r = await client.get("/admin/crawl-runs")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["total"] == 3
+        assert [run["run_id"] for run in body["runs"]] == [
+            newer_second.id,
+            newer_first.id,
+            older.id,
+        ]
+
+    async def test_list_crawl_runs_filters_by_source(
+        self,
+        client: AsyncClient,
+        session: AsyncSession,
+    ):
+        remoteok = await _create_crawl_run(
+            session,
+            source="remoteok",
+            status="queued",
+            celery_task_id="task-api-list-source-001",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        await _create_crawl_run(
+            session,
+            source="weworkremotely",
+            status="queued",
+            celery_task_id="task-api-list-source-002",
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+
+        r = await client.get("/admin/crawl-runs", params={"source": "remoteok"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["total"] == 1
+        assert [run["run_id"] for run in body["runs"]] == [remoteok.id]
+
+    async def test_list_crawl_runs_filters_by_status(
+        self,
+        client: AsyncClient,
+        session: AsyncSession,
+    ):
+        succeeded = await _create_crawl_run(
+            session,
+            source="remoteok",
+            status="succeeded",
+            celery_task_id="task-api-list-status-001",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        await _create_crawl_run(
+            session,
+            source="remoteok",
+            status="failed",
+            celery_task_id="task-api-list-status-002",
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+
+        r = await client.get("/admin/crawl-runs", params={"status": "succeeded"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["total"] == 1
+        assert [run["run_id"] for run in body["runs"]] == [succeeded.id]
+
+    async def test_list_crawl_runs_filters_by_source_and_status(
+        self,
+        client: AsyncClient,
+        session: AsyncSession,
+    ):
+        matching = await _create_crawl_run(
+            session,
+            source="remoteok",
+            status="failed",
+            celery_task_id="task-api-list-combined-001",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        await _create_crawl_run(
+            session,
+            source="remoteok",
+            status="succeeded",
+            celery_task_id="task-api-list-combined-002",
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+        await _create_crawl_run(
+            session,
+            source="weworkremotely",
+            status="failed",
+            celery_task_id="task-api-list-combined-003",
+            created_at=datetime(2026, 1, 3, tzinfo=timezone.utc),
+        )
+
+        r = await client.get(
+            "/admin/crawl-runs",
+            params={"source": "remoteok", "status": "failed"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["total"] == 1
+        assert [run["run_id"] for run in body["runs"]] == [matching.id]
+
+    async def test_list_crawl_runs_paginates_filtered_results(
+        self,
+        client: AsyncClient,
+        session: AsyncSession,
+    ):
+        oldest = await _create_crawl_run(
+            session,
+            source="remoteok",
+            status="queued",
+            celery_task_id="task-api-list-page-001",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        await _create_crawl_run(
+            session,
+            source="remoteok",
+            status="queued",
+            celery_task_id="task-api-list-page-002",
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+        await _create_crawl_run(
+            session,
+            source="remoteok",
+            status="queued",
+            celery_task_id="task-api-list-page-003",
+            created_at=datetime(2026, 1, 3, tzinfo=timezone.utc),
+        )
+        await _create_crawl_run(
+            session,
+            source="weworkremotely",
+            status="queued",
+            celery_task_id="task-api-list-page-004",
+            created_at=datetime(2026, 1, 4, tzinfo=timezone.utc),
+        )
+
+        r = await client.get(
+            "/admin/crawl-runs",
+            params={"source": "remoteok", "page": 2, "page_size": 2},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["total"] == 3
+        assert body["page"] == 2
+        assert body["page_size"] == 2
+        assert [run["run_id"] for run in body["runs"]] == [oldest.id]
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {"page": 0},
+            {"page_size": 0},
+            {"page_size": 101},
+        ],
+    )
+    async def test_list_crawl_runs_rejects_invalid_pagination(
+        self,
+        client: AsyncClient,
+        params: dict,
+    ):
+        r = await client.get("/admin/crawl-runs", params=params)
+        assert r.status_code == 422
+
+    async def test_get_crawl_run_returns_record(
+        self,
+        client: AsyncClient,
+        session: AsyncSession,
+    ):
+        run = await _create_crawl_run(
+            session,
+            source="remoteok",
+            status="succeeded",
+            celery_task_id="task-api-get-001",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+
+        r = await client.get(f"/admin/crawl-runs/{run.id}")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["run_id"] == run.id
+        assert body["source"] == "remoteok"
+        assert body["status"] == "succeeded"
+        assert body["celery_task_id"] == "task-api-get-001"
+
+    async def test_get_crawl_run_missing_returns_404(self, client: AsyncClient):
+        r = await client.get("/admin/crawl-runs/999999")
+        assert r.status_code == 404
+        assert r.json()["detail"] == "crawl run not found: 999999"
+
+    async def test_get_crawl_run_non_integer_rejected(self, client: AsyncClient):
+        r = await client.get("/admin/crawl-runs/not-an-int")
+        assert r.status_code == 422
+
+    async def test_crawl_unknown_source_rejected(
+        self,
+        client: AsyncClient,
+        monkeypatch,
+        session: AsyncSession,
+    ):
+        dispatched: list[tuple[list[str], str]] = []
+        monkeypatch.setattr(
+            "app.api.admin.crawl_source.apply_async",
+            lambda args, task_id: dispatched.append((args, task_id)),
+        )
+
         r = await client.post("/admin/crawl", json={"source": "not-real"})
         assert r.status_code == 400
         assert "unknown source" in r.json()["detail"]
+        assert dispatched == []
 
-    async def test_crawl_specific_source_dispatches(self, client: AsyncClient, monkeypatch):
-        dispatched: list[str] = []
+        runs = (await session.scalars(select(CrawlRun))).all()
+        assert runs == []
 
-        def fake_delay(name):  # mimic celery task.delay signature
-            dispatched.append(name)
+    async def test_crawl_specific_source_dispatches(
+        self,
+        client: AsyncClient,
+        monkeypatch,
+        session: AsyncSession,
+    ):
+        dispatched: list[tuple[list[str], str]] = []
 
-        monkeypatch.setattr("app.api.admin.crawl_source.delay", fake_delay)
+        def fake_apply_async(args, task_id):
+            dispatched.append((args, task_id))
+
+        monkeypatch.setattr("app.api.admin.crawl_source.apply_async", fake_apply_async)
         r = await client.post("/admin/crawl", json={"source": "remoteok"})
         assert r.status_code == 200
-        assert r.json() == {"dispatched": ["remoteok"]}
-        assert dispatched == ["remoteok"]
+        body = r.json()
+        assert body["dispatched"] == ["remoteok"]
+        assert len(body["runs"]) == 1
 
-    async def test_crawl_all_when_source_omitted(self, client: AsyncClient, monkeypatch):
-        dispatched: list[str] = []
+        run = body["runs"][0]
+        assert run["source"] == "remoteok"
+        assert run["status"] == "queued"
+        assert run["attempt_count"] == 0
+        assert isinstance(run["run_id"], int)
+        assert dispatched == [(["remoteok"], run["celery_task_id"])]
+
+        db_run = await session.get(CrawlRun, run["run_id"])
+        assert db_run is not None
+        assert db_run.source == "remoteok"
+        assert db_run.status == "queued"
+        assert db_run.celery_task_id == run["celery_task_id"]
+
+    async def test_crawl_specific_source_returns_queued_run_defaults(
+        self,
+        client: AsyncClient,
+        monkeypatch,
+    ):
         monkeypatch.setattr(
-            "app.api.admin.crawl_source.delay",
-            lambda name: dispatched.append(name),
+            "app.api.admin.crawl_source.apply_async",
+            lambda args, task_id: None,
         )
+
+        r = await client.post("/admin/crawl", json={"source": "remoteok"})
+        assert r.status_code == 200
+        run = r.json()["runs"][0]
+        assert run["received"] == 0
+        assert run["inserted"] == 0
+        assert run["updated"] == 0
+        assert run["duplicates"] == 0
+        assert run["error_message"] is None
+        assert run["created_at"] is not None
+        assert run["started_at"] is None
+        assert run["finished_at"] is None
+
+    async def test_crawl_all_when_source_omitted(
+        self,
+        client: AsyncClient,
+        monkeypatch,
+        session: AsyncSession,
+    ):
+        dispatched: list[tuple[list[str], str]] = []
+
+        def fake_apply_async(args, task_id):
+            dispatched.append((args, task_id))
+
+        monkeypatch.setattr("app.api.admin.crawl_source.apply_async", fake_apply_async)
         r = await client.post("/admin/crawl", json={})
         assert r.status_code == 200
         body = r.json()
-        assert set(body["dispatched"]) == set(dispatched)
-        assert "remoteok" in dispatched and "weworkremotely" in dispatched
+        source_names = registry.names()
+        task_ids = [task_id for _, task_id in dispatched]
+
+        assert set(body["dispatched"]) == set(source_names)
+        assert [args[0] for args, _ in dispatched] == source_names
+        assert len(task_ids) == len(set(task_ids))
+        assert len(body["runs"]) == len(source_names)
+        assert {run["source"] for run in body["runs"]} == set(source_names)
+        assert {run["status"] for run in body["runs"]} == {"queued"}
+
+        runs = (await session.scalars(select(CrawlRun))).all()
+        assert len(runs) == len(source_names)
+        assert {run.source for run in runs} == set(source_names)
+
+    async def test_crawl_dispatch_failure_marks_run_failed(
+        self,
+        client: AsyncClient,
+        monkeypatch,
+        session: AsyncSession,
+    ):
+        def fake_apply_async(args, task_id):
+            raise RuntimeError("broker unavailable")
+
+        monkeypatch.setattr("app.api.admin.crawl_source.apply_async", fake_apply_async)
+        r = await client.post("/admin/crawl", json={"source": "remoteok"})
+        assert r.status_code == 503
+        assert r.json()["detail"] == "failed to dispatch source: remoteok"
+
+        runs = (await session.scalars(select(CrawlRun))).all()
+        assert len(runs) == 1
+        run = runs[0]
+        assert run.source == "remoteok"
+        assert run.status == "failed"
+        assert run.error_message is not None
+        assert "broker unavailable" in run.error_message
+        assert run.finished_at is not None
 
     async def test_crawl_payload_is_optional(self, client: AsyncClient, monkeypatch):
-        monkeypatch.setattr("app.api.admin.crawl_source.delay", lambda _: None)
+        monkeypatch.setattr(
+            "app.api.admin.crawl_source.apply_async",
+            lambda args, task_id: None,
+        )
         # Missing body is also fine — CrawlRequest has all-optional fields.
         r = await client.post("/admin/crawl", json={})
         assert r.status_code == 200
