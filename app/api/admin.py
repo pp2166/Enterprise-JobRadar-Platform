@@ -86,6 +86,7 @@ async def trigger_crawl(
             session,
             source=source,
             celery_task_id=task_id,
+            trigger_type="api",
         )
 
         try:

@@ -87,6 +87,7 @@ async def _run_crawler_attempt(
                     session,
                     source=name,
                     celery_task_id=task_id,
+                    trigger_type="direct",
                 )
 
         if run is not None:

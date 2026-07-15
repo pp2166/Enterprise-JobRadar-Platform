@@ -46,11 +46,15 @@ async def create_crawl_run(
     *,
     source: str,
     celery_task_id: str,
+    trigger_type: str = "api",
+    retry_of_run_id: int | None = None,
 ) -> CrawlRun:
     run = CrawlRun(
         source=source,
         status="queued",
         celery_task_id=celery_task_id,
+        trigger_type=trigger_type,
+        retry_of_run_id=retry_of_run_id,
     )
 
     session.add(run)

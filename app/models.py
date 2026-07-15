@@ -6,6 +6,7 @@ from sqlalchemy import (
     BigInteger,
     Column,
     DateTime,
+    ForeignKey,
     Index,
     String,
     Text,
@@ -76,6 +77,20 @@ class CrawlRun(Base):
         unique=True,
         index=True,
     )
+    retry_of_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "crawl_runs.id",
+            name="fk_crawl_runs_retry_of_run_id",
+            ondelete="NO ACTION",
+        ),
+        nullable=True,
+    )
+    trigger_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="api",
+        server_default="api",
+    )
 
     attempt_count: Mapped[int] = mapped_column(default=0)
 
@@ -101,4 +116,5 @@ class CrawlRun(Base):
 
     __table_args__ = (
         Index("ix_crawl_runs_created_at_desc", created_at.desc()),
+        Index("ix_crawl_runs_retry_of_run_id", "retry_of_run_id"),
     )

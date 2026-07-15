@@ -55,6 +55,8 @@ async def test_crawl_run_persists_default_values(session):
     assert run.id is not None
     assert run.source == "remoteok"
     assert run.status == "queued"
+    assert run.retry_of_run_id is None
+    assert run.trigger_type == "api"
     assert run.attempt_count == 0
     assert run.received == 0
     assert run.inserted == 0
@@ -118,6 +120,8 @@ async def test_create_crawl_run_persists_queued_record(session):
     assert run.source == "remoteok"
     assert run.status == "queued"
     assert run.celery_task_id == "task-service-create-001"
+    assert run.trigger_type == "api"
+    assert run.retry_of_run_id is None
     assert run.attempt_count == 0
     assert run.created_at is not None
 
@@ -130,6 +134,66 @@ async def test_create_crawl_run_persists_queued_record(session):
     assert stored.source == "remoteok"
     assert stored.status == "queued"
     assert stored.celery_task_id == "task-service-create-001"
+    assert stored.trigger_type == "api"
+    assert stored.retry_of_run_id is None
+
+
+@pytest.mark.asyncio
+async def test_create_crawl_run_persists_explicit_trigger_type(session):
+    run = await create_crawl_run(
+        session,
+        source="remoteok",
+        celery_task_id="task-service-direct-001",
+        trigger_type="direct",
+    )
+
+    assert run.trigger_type == "direct"
+
+    stored = await session.get(CrawlRun, run.id)
+
+    assert stored is not None
+    assert stored.trigger_type == "direct"
+
+
+@pytest.mark.asyncio
+async def test_create_crawl_run_persists_retry_parent(session):
+    parent = await create_crawl_run(
+        session,
+        source="remoteok",
+        celery_task_id="task-service-parent-001",
+    )
+
+    child = await create_crawl_run(
+        session,
+        source="remoteok",
+        celery_task_id="task-service-child-001",
+        trigger_type="manual",
+        retry_of_run_id=parent.id,
+    )
+
+    assert child.retry_of_run_id == parent.id
+    assert child.trigger_type == "manual"
+
+    await session.refresh(parent)
+    assert parent.retry_of_run_id is None
+    assert parent.status == "queued"
+
+
+def test_crawl_run_metadata_includes_failure_management_fields():
+    table = CrawlRun.__table__
+
+    assert "retry_of_run_id" in table.c
+    assert "trigger_type" in table.c
+
+    fk = next(
+        constraint
+        for constraint in table.foreign_key_constraints
+        if constraint.name == "fk_crawl_runs_retry_of_run_id"
+    )
+    assert fk.ondelete == "NO ACTION"
+    assert list(fk.elements)[0].target_fullname == "crawl_runs.id"
+
+    assert "ix_crawl_runs_retry_of_run_id" in {index.name for index in table.indexes}
 
 
 @pytest.mark.asyncio

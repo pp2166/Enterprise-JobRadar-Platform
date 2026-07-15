@@ -445,6 +445,7 @@ class TestAdminEndpoints:
         assert db_run.source == "remoteok"
         assert db_run.status == "queued"
         assert db_run.celery_task_id == run["celery_task_id"]
+        assert db_run.trigger_type == "api"
 
     async def test_crawl_specific_source_returns_queued_run_defaults(
         self,

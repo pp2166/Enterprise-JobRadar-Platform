@@ -284,6 +284,7 @@ class TestCrawlSourceRunTracking:
         assert run.source == "legacy"
         assert run.status == "succeeded"
         assert run.celery_task_id == "task-worker-missing-001"
+        assert run.trigger_type == "direct"
         assert run.attempt_count == 1
         assert run.started_at is not None
         assert run.finished_at is not None
