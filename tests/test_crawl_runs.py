@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import select
 
 from app.models import CrawlRun
+from app.services.crawl_runs import create_crawl_run
 
 
 @pytest.mark.asyncio
@@ -71,3 +72,29 @@ async def test_crawl_run_persists_success_result(session):
     assert stored.updated == 5
     assert stored.duplicates == 5
     assert stored.error_message is None
+
+
+@pytest.mark.asyncio
+async def test_create_crawl_run_persists_queued_record(session):
+    run = await create_crawl_run(
+        session,
+        source="remoteok",
+        celery_task_id="task-service-create-001",
+    )
+
+    assert run.id is not None
+    assert run.source == "remoteok"
+    assert run.status == "queued"
+    assert run.celery_task_id == "task-service-create-001"
+    assert run.attempt_count == 0
+    assert run.created_at is not None
+
+    stored = (
+        await session.execute(
+            select(CrawlRun).where(CrawlRun.id == run.id)
+        )
+    ).scalar_one()
+
+    assert stored.source == "remoteok"
+    assert stored.status == "queued"
+    assert stored.celery_task_id == "task-service-create-001"
