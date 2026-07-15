@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.crawlers import registry
@@ -246,7 +247,7 @@ class TestCrawlSourceRunTracking:
         assert run.error_message is None
         assert run.finished_at is not None
 
-    async def test_missing_crawl_run_task_still_executes(
+    async def test_missing_crawl_run_task_auto_creates_record(
         self,
         patched_tasks,
         monkeypatch,
@@ -272,7 +273,64 @@ class TestCrawlSourceRunTracking:
             "updated": 0,
             "duplicates": 0,
         }
-        assert await session.get(CrawlRun, 1) is None
+
+        run = (
+            await session.scalars(
+                select(CrawlRun).where(
+                    CrawlRun.celery_task_id == "task-worker-missing-001"
+                )
+            )
+        ).one()
+        assert run.source == "legacy"
+        assert run.status == "succeeded"
+        assert run.celery_task_id == "task-worker-missing-001"
+        assert run.attempt_count == 1
+        assert run.started_at is not None
+        assert run.finished_at is not None
+        assert run.received == 1
+        assert run.inserted == 1
+        assert run.updated == 0
+        assert run.duplicates == 0
+
+    async def test_existing_task_id_reuses_crawl_run_without_duplicate(
+        self,
+        patched_tasks,
+        monkeypatch,
+        session: AsyncSession,
+        make_job,
+    ):
+        run = await create_crawl_run(
+            session,
+            source="manual",
+            celery_task_id="task-worker-existing-001",
+        )
+        manual = _StubCrawler(jobs=[make_job(source="manual", source_id="1")])
+        monkeypatch.setitem(registry._items, "manual", manual)
+        try:
+            result = await patched_tasks._run_crawler_attempt(
+                "manual",
+                task_id="task-worker-existing-001",
+                retries=0,
+                max_retries=3,
+            )
+        finally:
+            registry._items.pop("manual", None)
+
+        assert result["source"] == "manual"
+        assert result["inserted"] == 1
+
+        runs = (
+            await session.scalars(
+                select(CrawlRun).where(
+                    CrawlRun.celery_task_id == "task-worker-existing-001"
+                )
+            )
+        ).all()
+        assert len(runs) == 1
+        assert runs[0].id == run.id
+        await session.refresh(run)
+        assert run.status == "succeeded"
+        assert run.attempt_count == 1
 
 
 class TestCeleryTaskWrappers:

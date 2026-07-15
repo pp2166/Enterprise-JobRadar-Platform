@@ -8,6 +8,7 @@ from app.crawlers import registry
 from app.database import AsyncSessionLocal
 from app.schema import init_schema
 from app.services.crawl_runs import (
+    create_crawl_run,
     find_crawl_run_by_task_id,
     mark_crawl_run_failed,
     mark_crawl_run_retrying,
@@ -81,6 +82,12 @@ async def _run_crawler_attempt(
                 session,
                 celery_task_id=task_id,
             )
+            if run is None:
+                run = await create_crawl_run(
+                    session,
+                    source=name,
+                    celery_task_id=task_id,
+                )
 
         if run is not None:
             run_id = run.id
