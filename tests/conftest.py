@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.models import Job
+from app.models import CrawlRun, Job
 from app.services.normalize import NormalizedJob
 
 
@@ -28,6 +28,7 @@ async def sqlite_engine():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", future=True)
     async with engine.begin() as conn:
         await conn.run_sync(lambda c: Job.__table__.create(c, checkfirst=True))
+        await conn.run_sync(lambda c: CrawlRun.__table__.create(c, checkfirst=True))
     try:
         yield engine
     finally:

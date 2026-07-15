@@ -63,3 +63,42 @@ class Job(Base):
         Index("ix_jobs_search_vector", "search_vector", postgresql_using="gin"),
         Index("ix_jobs_posted_at_desc", posted_at.desc()),
     )
+
+class CrawlRun(Base):
+    __tablename__ = "crawl_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    source: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    celery_task_id: Mapped[str] = mapped_column(
+        String(255),
+        unique=True,
+        index=True,
+    )
+
+    attempt_count: Mapped[int] = mapped_column(default=0)
+
+    received: Mapped[int] = mapped_column(default=0)
+    inserted: Mapped[int] = mapped_column(default=0)
+    updated: Mapped[int] = mapped_column(default=0)
+    duplicates: Mapped[int] = mapped_column(default=0)
+
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    __table_args__ = (
+        Index("ix_crawl_runs_created_at_desc", created_at.desc()),
+    )
