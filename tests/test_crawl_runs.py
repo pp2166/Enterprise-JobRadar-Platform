@@ -12,11 +12,33 @@ from app.services.crawl_runs import (
     CrawlRunNotFoundError,
     create_crawl_run,
     find_crawl_run_by_task_id,
+    get_crawl_run,
+    list_crawl_runs,
     mark_crawl_run_failed,
     mark_crawl_run_retrying,
     mark_crawl_run_running,
     mark_crawl_run_succeeded,
 )
+
+
+async def _create_list_run(
+    session,
+    *,
+    source: str,
+    status: str,
+    celery_task_id: str,
+    created_at: datetime,
+) -> CrawlRun:
+    run = CrawlRun(
+        source=source,
+        status=status,
+        celery_task_id=celery_task_id,
+        created_at=created_at,
+    )
+    session.add(run)
+    await session.commit()
+    await session.refresh(run)
+    return run
 
 
 @pytest.mark.asyncio
@@ -136,6 +158,222 @@ async def test_find_crawl_run_by_task_id_returns_none_for_missing_task(session):
     )
 
     assert found is None
+
+
+@pytest.mark.asyncio
+async def test_get_crawl_run_returns_record_by_id(session):
+    run = await create_crawl_run(
+        session,
+        source="remoteok",
+        celery_task_id="task-get-001",
+    )
+
+    found = await get_crawl_run(
+        session,
+        run_id=run.id,
+    )
+
+    assert found.id == run.id
+    assert found.celery_task_id == "task-get-001"
+
+
+@pytest.mark.asyncio
+async def test_get_crawl_run_rejects_missing_run(session):
+    with pytest.raises(
+        CrawlRunNotFoundError,
+        match="crawl run not found: 999999",
+    ):
+        await get_crawl_run(
+            session,
+            run_id=999999,
+        )
+
+
+@pytest.mark.asyncio
+async def test_list_crawl_runs_orders_by_created_at_then_id_desc(session):
+    older = await _create_list_run(
+        session,
+        source="remoteok",
+        status="queued",
+        celery_task_id="task-list-order-001",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    newer_first = await _create_list_run(
+        session,
+        source="remoteok",
+        status="running",
+        celery_task_id="task-list-order-002",
+        created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+    newer_second = await _create_list_run(
+        session,
+        source="weworkremotely",
+        status="succeeded",
+        celery_task_id="task-list-order-003",
+        created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+
+    page = await list_crawl_runs(session)
+
+    assert page.total == 3
+    assert [run.id for run in page.records] == [
+        newer_second.id,
+        newer_first.id,
+        older.id,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_crawl_runs_filters_by_source(session):
+    remoteok = await _create_list_run(
+        session,
+        source="remoteok",
+        status="queued",
+        celery_task_id="task-list-source-001",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    await _create_list_run(
+        session,
+        source="weworkremotely",
+        status="queued",
+        celery_task_id="task-list-source-002",
+        created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+
+    page = await list_crawl_runs(session, source="remoteok")
+
+    assert page.total == 1
+    assert [run.id for run in page.records] == [remoteok.id]
+
+
+@pytest.mark.asyncio
+async def test_list_crawl_runs_filters_by_status(session):
+    succeeded = await _create_list_run(
+        session,
+        source="remoteok",
+        status="succeeded",
+        celery_task_id="task-list-status-001",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    await _create_list_run(
+        session,
+        source="remoteok",
+        status="failed",
+        celery_task_id="task-list-status-002",
+        created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+
+    page = await list_crawl_runs(session, status="succeeded")
+
+    assert page.total == 1
+    assert [run.id for run in page.records] == [succeeded.id]
+
+
+@pytest.mark.asyncio
+async def test_list_crawl_runs_filters_by_source_and_status(session):
+    matching = await _create_list_run(
+        session,
+        source="remoteok",
+        status="failed",
+        celery_task_id="task-list-combined-001",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    await _create_list_run(
+        session,
+        source="remoteok",
+        status="succeeded",
+        celery_task_id="task-list-combined-002",
+        created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+    await _create_list_run(
+        session,
+        source="weworkremotely",
+        status="failed",
+        celery_task_id="task-list-combined-003",
+        created_at=datetime(2026, 1, 3, tzinfo=timezone.utc),
+    )
+
+    page = await list_crawl_runs(
+        session,
+        source="remoteok",
+        status="failed",
+    )
+
+    assert page.total == 1
+    assert [run.id for run in page.records] == [matching.id]
+
+
+@pytest.mark.asyncio
+async def test_list_crawl_runs_paginates_records(session):
+    oldest = await _create_list_run(
+        session,
+        source="remoteok",
+        status="queued",
+        celery_task_id="task-list-page-001",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    await _create_list_run(
+        session,
+        source="remoteok",
+        status="queued",
+        celery_task_id="task-list-page-002",
+        created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+    await _create_list_run(
+        session,
+        source="remoteok",
+        status="queued",
+        celery_task_id="task-list-page-003",
+        created_at=datetime(2026, 1, 3, tzinfo=timezone.utc),
+    )
+
+    page = await list_crawl_runs(session, page=2, page_size=2)
+
+    assert page.total == 3
+    assert [run.id for run in page.records] == [oldest.id]
+
+
+@pytest.mark.asyncio
+async def test_list_crawl_runs_total_is_filtered_count(session):
+    await _create_list_run(
+        session,
+        source="remoteok",
+        status="queued",
+        celery_task_id="task-list-total-001",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    await _create_list_run(
+        session,
+        source="remoteok",
+        status="failed",
+        celery_task_id="task-list-total-002",
+        created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+    await _create_list_run(
+        session,
+        source="weworkremotely",
+        status="queued",
+        celery_task_id="task-list-total-003",
+        created_at=datetime(2026, 1, 3, tzinfo=timezone.utc),
+    )
+
+    page = await list_crawl_runs(
+        session,
+        source="remoteok",
+        page=1,
+        page_size=1,
+    )
+
+    assert page.total == 2
+    assert len(page.records) == 1
+
+
+@pytest.mark.asyncio
+async def test_list_crawl_runs_returns_empty_page(session):
+    page = await list_crawl_runs(session, source="not-real")
+
+    assert page.total == 0
+    assert page.records == []
 
 
 @pytest.mark.asyncio
