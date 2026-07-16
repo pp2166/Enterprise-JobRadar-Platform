@@ -33,4 +33,8 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(minute="5-59/30"),
         "args": ("weworkremotely",),
     },
+    "recover-stale-crawl-runs": {
+        "task": "app.workers.tasks.recover_stale_crawl_runs",
+        "schedule": crontab(minute="*/5"),
+    },
 }

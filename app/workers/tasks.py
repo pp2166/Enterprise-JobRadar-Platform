@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from billiard.exceptions import SoftTimeLimitExceeded
@@ -19,6 +20,7 @@ from app.services.crawl_runs import (
     mark_crawl_run_retrying,
     mark_crawl_run_running,
     mark_crawl_run_succeeded,
+    recover_stale_crawl_runs as recover_stale_crawl_runs_service,
 )
 from app.services.ingest import IngestStats, ingest_jobs
 from app.services.normalize import NormalizedJob
@@ -28,6 +30,8 @@ log = logging.getLogger(__name__)
 
 CRAWL_SOFT_TIME_LIMIT_SECONDS = 120
 CRAWL_TIME_LIMIT_SECONDS = 150
+STALE_CRAWL_RUN_THRESHOLD_MINUTES = 20
+STALE_CRAWL_RUN_ERROR_MESSAGE = "stale crawl run recovered after 20 minutes"
 
 _schema_ready = False
 
@@ -125,6 +129,43 @@ async def _dispatch_crawl_source(
         "status": "dispatched",
         "run_id": run.id,
         "celery_task_id": task_id,
+    }
+
+
+async def _recover_stale_crawl_runs(
+    *,
+    recovered_at: datetime | None = None,
+) -> dict:
+    await _ensure_schema()
+
+    if recovered_at is None:
+        recovered_at = datetime.now(timezone.utc)
+
+    stale_before = recovered_at - timedelta(
+        minutes=STALE_CRAWL_RUN_THRESHOLD_MINUTES,
+    )
+
+    async with AsyncSessionLocal() as session:
+        recovered_run_ids = await recover_stale_crawl_runs_service(
+            session,
+            stale_before=stale_before,
+            recovered_at=recovered_at,
+            error_message=STALE_CRAWL_RUN_ERROR_MESSAGE,
+        )
+
+    if recovered_run_ids:
+        log.info(
+            "recovered %d stale crawl runs: %s",
+            len(recovered_run_ids),
+            recovered_run_ids,
+        )
+    else:
+        log.debug("no stale crawl runs recovered")
+
+    return {
+        "status": "completed",
+        "recovered_count": len(recovered_run_ids),
+        "recovered_run_ids": recovered_run_ids,
     }
 
 
@@ -256,6 +297,11 @@ def dispatch_crawl_source(
             trigger_type=trigger_type,
         )
     )
+
+
+@celery_app.task(name="app.workers.tasks.recover_stale_crawl_runs")
+def recover_stale_crawl_runs_task() -> dict:
+    return asyncio.run(_recover_stale_crawl_runs())
 
 
 @celery_app.task(name="app.workers.tasks.crawl_all")

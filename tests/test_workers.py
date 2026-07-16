@@ -5,7 +5,9 @@ and assert the task module's retry / dispatch glue. Redis is never contacted.
 """
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -26,16 +28,35 @@ async def _create_worker_crawl_run(
     source: str,
     status: str,
     celery_task_id: str,
+    created_at: datetime | None = None,
+    started_at: datetime | None = None,
+    finished_at: datetime | None = None,
 ) -> CrawlRun:
+    values = {
+        "source": source,
+        "status": status,
+        "celery_task_id": celery_task_id,
+    }
+    if created_at is not None:
+        values["created_at"] = created_at
+    if started_at is not None:
+        values["started_at"] = started_at
+    if finished_at is not None:
+        values["finished_at"] = finished_at
+
     run = CrawlRun(
-        source=source,
-        status=status,
-        celery_task_id=celery_task_id,
+        **values,
     )
     session.add(run)
     await session.commit()
     await session.refresh(run)
     return run
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 class _StubCrawler(BaseCrawler):
@@ -613,6 +634,137 @@ class TestCrawlSourceDispatch:
         assert run.attempt_count == 1
 
 
+@pytest.mark.asyncio
+class TestRecoverStaleCrawlRuns:
+    async def test_recovery_helper_recovers_only_stale_active_runs(
+        self,
+        patched_tasks,
+        session: AsyncSession,
+    ):
+        recovered_at = datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc)
+        stale_run = await _create_worker_crawl_run(
+            session,
+            source="remoteok",
+            status="queued",
+            celery_task_id="task-stale-queued-001",
+            created_at=recovered_at - timedelta(minutes=21),
+        )
+        fresh_run = await _create_worker_crawl_run(
+            session,
+            source="remoteok",
+            status="queued",
+            celery_task_id="task-fresh-queued-001",
+            created_at=recovered_at - timedelta(minutes=19),
+        )
+        succeeded_run = await _create_worker_crawl_run(
+            session,
+            source="remoteok",
+            status="succeeded",
+            celery_task_id="task-old-succeeded-001",
+            created_at=recovered_at - timedelta(hours=1),
+        )
+
+        result = await patched_tasks._recover_stale_crawl_runs(
+            recovered_at=recovered_at,
+        )
+
+        assert result == {
+            "status": "completed",
+            "recovered_count": 1,
+            "recovered_run_ids": [stale_run.id],
+        }
+        json.dumps(result)
+
+        await session.refresh(stale_run)
+        await session.refresh(fresh_run)
+        await session.refresh(succeeded_run)
+
+        assert stale_run.status == "failed"
+        assert stale_run.error_message == (
+            "stale crawl run recovered after 20 minutes"
+        )
+        assert stale_run.finished_at is not None
+        assert _as_utc(stale_run.finished_at) == recovered_at
+        assert fresh_run.status == "queued"
+        assert fresh_run.finished_at is None
+        assert succeeded_run.status == "succeeded"
+        assert succeeded_run.finished_at is None
+
+    async def test_recovery_helper_returns_empty_result_without_stale_records(
+        self,
+        patched_tasks,
+        session: AsyncSession,
+    ):
+        recovered_at = datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc)
+        await _create_worker_crawl_run(
+            session,
+            source="remoteok",
+            status="queued",
+            celery_task_id="task-fresh-queued-empty-001",
+            created_at=recovered_at - timedelta(minutes=5),
+        )
+
+        result = await patched_tasks._recover_stale_crawl_runs(
+            recovered_at=recovered_at,
+        )
+
+        assert result == {
+            "status": "completed",
+            "recovered_count": 0,
+            "recovered_run_ids": [],
+        }
+        json.dumps(result)
+
+    async def test_recovery_helper_calculates_threshold_and_passes_arguments(
+        self,
+        patched_tasks,
+        monkeypatch,
+    ):
+        recovered_at = datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc)
+        recover_mock = AsyncMock(return_value=[10, 11])
+        monkeypatch.setattr(
+            patched_tasks,
+            "recover_stale_crawl_runs_service",
+            recover_mock,
+        )
+
+        result = await patched_tasks._recover_stale_crawl_runs(
+            recovered_at=recovered_at,
+        )
+
+        assert result == {
+            "status": "completed",
+            "recovered_count": 2,
+            "recovered_run_ids": [10, 11],
+        }
+        recover_mock.assert_awaited_once()
+        call_kwargs = recover_mock.await_args.kwargs
+        assert call_kwargs["stale_before"] == recovered_at - timedelta(minutes=20)
+        assert call_kwargs["recovered_at"] == recovered_at
+        assert call_kwargs["error_message"] == (
+            "stale crawl run recovered after 20 minutes"
+        )
+
+    async def test_recovery_helper_propagates_service_errors(
+        self,
+        patched_tasks,
+        monkeypatch,
+    ):
+        async def fail_recovery(*args, **kwargs):
+            raise RuntimeError("database unavailable")
+
+        monkeypatch.setattr(
+            patched_tasks,
+            "recover_stale_crawl_runs_service",
+            fail_recovery,
+        )
+
+        with pytest.raises(RuntimeError, match="database unavailable"):
+            await patched_tasks._recover_stale_crawl_runs(
+                recovered_at=datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc),
+            )
+
+
 class TestCeleryTaskWrappers:
     def test_schema_failure_still_retries(self, monkeypatch):
         from app.workers import tasks
@@ -734,6 +886,52 @@ class TestCeleryTaskWrappers:
         assert calls == registry.names()
         fake_crawl_source.delay.assert_not_called()
 
+    def test_recover_stale_crawl_runs_task_runs_helper_once(self, monkeypatch):
+        from app.workers import tasks
+
+        expected = {
+            "status": "completed",
+            "recovered_count": 1,
+            "recovered_run_ids": [7],
+        }
+        calls = []
+
+        def fake_run(coro):
+            calls.append(coro)
+            coro.close()
+            return expected
+
+        fake_crawl_source = MagicMock()
+        fake_crawl_source.apply_async = MagicMock(
+            side_effect=AssertionError("crawl_source should not be dispatched")
+        )
+        fake_dispatcher = MagicMock()
+        fake_dispatcher.delay = MagicMock(
+            side_effect=AssertionError("dispatcher should not be dispatched")
+        )
+        monkeypatch.setattr(tasks.asyncio, "run", fake_run)
+        monkeypatch.setattr(tasks, "crawl_source", fake_crawl_source)
+        monkeypatch.setattr(tasks, "dispatch_crawl_source", fake_dispatcher)
+
+        result = tasks.recover_stale_crawl_runs_task.run()
+
+        assert result == expected
+        assert len(calls) == 1
+        fake_crawl_source.apply_async.assert_not_called()
+        fake_dispatcher.delay.assert_not_called()
+
+    def test_recover_stale_crawl_runs_task_propagates_errors(self, monkeypatch):
+        from app.workers import tasks
+
+        def fake_run(coro):
+            coro.close()
+            raise RuntimeError("database unavailable")
+
+        monkeypatch.setattr(tasks.asyncio, "run", fake_run)
+
+        with pytest.raises(RuntimeError, match="database unavailable"):
+            tasks.recover_stale_crawl_runs_task.run()
+
 
 class TestCeleryConfig:
     def test_crawl_source_time_limit_configuration(self):
@@ -751,19 +949,39 @@ class TestCeleryConfig:
         assert crawl_source.default_retry_delay == 60
 
     def test_only_crawl_source_has_time_limits(self):
-        from app.workers.tasks import crawl_all, dispatch_crawl_source
+        from app.workers.tasks import (
+            crawl_all,
+            dispatch_crawl_source,
+            recover_stale_crawl_runs_task,
+        )
 
         assert dispatch_crawl_source.soft_time_limit is None
         assert dispatch_crawl_source.time_limit is None
         assert crawl_all.soft_time_limit is None
         assert crawl_all.time_limit is None
+        assert recover_stale_crawl_runs_task.soft_time_limit is None
+        assert recover_stale_crawl_runs_task.time_limit is None
 
-    def test_beat_schedule_includes_both_sources(self):
+    def test_recover_stale_crawl_runs_task_configuration(self):
+        from app.workers.tasks import crawl_source, recover_stale_crawl_runs_task
+
+        assert recover_stale_crawl_runs_task.name == (
+            "app.workers.tasks.recover_stale_crawl_runs"
+        )
+        assert getattr(recover_stale_crawl_runs_task.run, "__self__", None) is None
+        assert recover_stale_crawl_runs_task.soft_time_limit is None
+        assert recover_stale_crawl_runs_task.time_limit is None
+        assert getattr(recover_stale_crawl_runs_task, "autoretry_for", ()) == ()
+        assert crawl_source.soft_time_limit == 120
+        assert crawl_source.time_limit == 150
+
+    def test_beat_schedule_includes_source_and_recovery_entries(self):
         from app.workers.celery_app import celery_app
 
         entries = celery_app.conf.beat_schedule
         assert "crawl-remoteok" in entries
         assert "crawl-weworkremotely" in entries
+        assert "recover-stale-crawl-runs" in entries
         assert entries["crawl-remoteok"]["task"] == (
             "app.workers.tasks.dispatch_crawl_source"
         )
@@ -774,6 +992,12 @@ class TestCeleryConfig:
         )
         assert entries["crawl-weworkremotely"]["args"] == ("weworkremotely",)
         assert entries["crawl-weworkremotely"]["schedule"]._orig_minute == "5-59/30"
+        assert entries["recover-stale-crawl-runs"]["task"] == (
+            "app.workers.tasks.recover_stale_crawl_runs"
+        )
+        assert entries["recover-stale-crawl-runs"]["schedule"]._orig_minute == "*/5"
+        assert entries["recover-stale-crawl-runs"].get("args", ()) == ()
+        assert entries["recover-stale-crawl-runs"].get("kwargs", {}) == {}
 
     def test_core_reliability_flags(self):
         from app.workers.celery_app import celery_app
