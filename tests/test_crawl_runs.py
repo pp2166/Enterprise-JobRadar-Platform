@@ -24,6 +24,7 @@ from app.services.crawl_runs import (
     mark_crawl_run_retrying,
     mark_crawl_run_running,
     mark_crawl_run_succeeded,
+    recover_stale_crawl_runs,
 )
 
 
@@ -40,6 +41,44 @@ async def _create_list_run(
         status=status,
         celery_task_id=celery_task_id,
         created_at=created_at,
+    )
+    session.add(run)
+    await session.commit()
+    await session.refresh(run)
+    return run
+
+
+async def _create_recovery_run(
+    session,
+    *,
+    status: str,
+    celery_task_id: str,
+    created_at: datetime,
+    source: str = "remoteok",
+    started_at: datetime | None = None,
+    finished_at: datetime | None = None,
+    trigger_type: str = "api",
+    retry_of_run_id: int | None = None,
+    attempt_count: int = 0,
+    received: int = 0,
+    inserted: int = 0,
+    updated: int = 0,
+    duplicates: int = 0,
+) -> CrawlRun:
+    run = CrawlRun(
+        source=source,
+        status=status,
+        celery_task_id=celery_task_id,
+        created_at=created_at,
+        started_at=started_at,
+        finished_at=finished_at,
+        trigger_type=trigger_type,
+        retry_of_run_id=retry_of_run_id,
+        attempt_count=attempt_count,
+        received=received,
+        inserted=inserted,
+        updated=updated,
+        duplicates=duplicates,
     )
     session.add(run)
     await session.commit()
@@ -116,6 +155,12 @@ def _crawl_run_snapshot(run: CrawlRun) -> dict[str, object]:
         "started_at": run.started_at,
         "finished_at": run.finished_at,
     }
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 @pytest.mark.asyncio
@@ -618,6 +663,306 @@ async def test_create_crawl_run_if_inactive_passes_trigger_type_and_retry_parent
 
     assert child.trigger_type == "manual"
     assert child.retry_of_run_id == parent.id
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_crawl_runs_recovers_queued_by_created_at(session):
+    stale_before = datetime(2026, 1, 1, 0, 20, tzinfo=timezone.utc)
+    recovered_at = datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc)
+    run = await _create_recovery_run(
+        session,
+        status="queued",
+        celery_task_id="task-recover-queued-001",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+    recovered_ids = await recover_stale_crawl_runs(
+        session,
+        stale_before=stale_before,
+        recovered_at=recovered_at,
+        error_message="stale crawl run recovered after 20 minutes",
+    )
+
+    await session.refresh(run)
+    assert recovered_ids == [run.id]
+    assert run.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_crawl_runs_recovers_running_by_started_at(session):
+    stale_before = datetime(2026, 1, 1, 0, 20, tzinfo=timezone.utc)
+    run = await _create_recovery_run(
+        session,
+        status="running",
+        celery_task_id="task-recover-running-001",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        started_at=datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
+    )
+
+    recovered_ids = await recover_stale_crawl_runs(
+        session,
+        stale_before=stale_before,
+        recovered_at=datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc),
+        error_message="stale crawl run recovered after 20 minutes",
+    )
+
+    await session.refresh(run)
+    assert recovered_ids == [run.id]
+    assert run.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_crawl_runs_recovers_retrying_by_started_at(session):
+    stale_before = datetime(2026, 1, 1, 0, 20, tzinfo=timezone.utc)
+    run = await _create_recovery_run(
+        session,
+        status="retrying",
+        celery_task_id="task-recover-retrying-001",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        started_at=datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
+    )
+
+    recovered_ids = await recover_stale_crawl_runs(
+        session,
+        stale_before=stale_before,
+        recovered_at=datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc),
+        error_message="stale crawl run recovered after 20 minutes",
+    )
+
+    await session.refresh(run)
+    assert recovered_ids == [run.id]
+    assert run.status == "failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["running", "retrying"])
+async def test_recover_stale_crawl_runs_falls_back_to_created_at(session, status):
+    stale_before = datetime(2026, 1, 1, 0, 20, tzinfo=timezone.utc)
+    run = await _create_recovery_run(
+        session,
+        status=status,
+        celery_task_id=f"task-recover-fallback-{status}-001",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        started_at=None,
+    )
+
+    recovered_ids = await recover_stale_crawl_runs(
+        session,
+        stale_before=stale_before,
+        recovered_at=datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc),
+        error_message="stale crawl run recovered after 20 minutes",
+    )
+
+    await session.refresh(run)
+    assert recovered_ids == [run.id]
+    assert run.status == "failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["running", "retrying"])
+async def test_recover_stale_crawl_runs_prefers_started_at(session, status):
+    stale_before = datetime(2026, 1, 1, 0, 20, tzinfo=timezone.utc)
+    run = await _create_recovery_run(
+        session,
+        status=status,
+        celery_task_id=f"task-recover-started-at-{status}-001",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        started_at=datetime(2026, 1, 1, 0, 21, tzinfo=timezone.utc),
+    )
+
+    recovered_ids = await recover_stale_crawl_runs(
+        session,
+        stale_before=stale_before,
+        recovered_at=datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc),
+        error_message="stale crawl run recovered after 20 minutes",
+    )
+
+    await session.refresh(run)
+    assert recovered_ids == []
+    assert run.status == status
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_crawl_runs_uses_strict_stale_boundary(session):
+    stale_before = datetime(2026, 1, 1, 0, 20, tzinfo=timezone.utc)
+    boundary = await _create_recovery_run(
+        session,
+        status="queued",
+        celery_task_id="task-recover-boundary-001",
+        created_at=stale_before,
+    )
+    fresh = await _create_recovery_run(
+        session,
+        status="queued",
+        celery_task_id="task-recover-fresh-001",
+        created_at=datetime(2026, 1, 1, 0, 21, tzinfo=timezone.utc),
+    )
+
+    recovered_ids = await recover_stale_crawl_runs(
+        session,
+        stale_before=stale_before,
+        recovered_at=datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc),
+        error_message="stale crawl run recovered after 20 minutes",
+    )
+
+    await session.refresh(boundary)
+    await session.refresh(fresh)
+    assert recovered_ids == []
+    assert boundary.status == "queued"
+    assert fresh.status == "queued"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["succeeded", "failed"])
+async def test_recover_stale_crawl_runs_does_not_recover_terminal_statuses(
+    session,
+    status,
+):
+    stale_before = datetime(2026, 1, 1, 0, 20, tzinfo=timezone.utc)
+    run = await _create_recovery_run(
+        session,
+        status=status,
+        celery_task_id=f"task-recover-terminal-{status}-001",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        started_at=datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
+        finished_at=datetime(2026, 1, 1, 0, 2, tzinfo=timezone.utc),
+    )
+    original = _crawl_run_snapshot(run)
+
+    recovered_ids = await recover_stale_crawl_runs(
+        session,
+        stale_before=stale_before,
+        recovered_at=datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc),
+        error_message="stale crawl run recovered after 20 minutes",
+    )
+
+    await session.refresh(run)
+    assert recovered_ids == []
+    assert _crawl_run_snapshot(run) == original
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_crawl_runs_returns_sorted_recovered_ids(session):
+    stale_before = datetime(2026, 1, 1, 0, 20, tzinfo=timezone.utc)
+    stale_queued = await _create_recovery_run(
+        session,
+        status="queued",
+        celery_task_id="task-recover-mixed-001",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    await _create_recovery_run(
+        session,
+        status="queued",
+        celery_task_id="task-recover-mixed-002",
+        created_at=datetime(2026, 1, 1, 0, 21, tzinfo=timezone.utc),
+    )
+    stale_running = await _create_recovery_run(
+        session,
+        status="running",
+        celery_task_id="task-recover-mixed-003",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        started_at=datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
+    )
+    await _create_recovery_run(
+        session,
+        status="succeeded",
+        celery_task_id="task-recover-mixed-004",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+    recovered_ids = await recover_stale_crawl_runs(
+        session,
+        stale_before=stale_before,
+        recovered_at=datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc),
+        error_message="stale crawl run recovered after 20 minutes",
+    )
+
+    assert recovered_ids == sorted([stale_queued.id, stale_running.id])
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_crawl_runs_only_updates_recovery_fields(session):
+    stale_before = datetime(2026, 1, 1, 0, 20, tzinfo=timezone.utc)
+    recovered_at = datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc)
+    parent = await _create_recovery_run(
+        session,
+        status="failed",
+        celery_task_id="task-recover-preserve-parent-001",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    run = await _create_recovery_run(
+        session,
+        status="running",
+        celery_task_id="task-recover-preserve-001",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        started_at=datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
+        trigger_type="manual",
+        retry_of_run_id=parent.id,
+        attempt_count=2,
+        received=10,
+        inserted=7,
+        updated=2,
+        duplicates=1,
+    )
+    original = _crawl_run_snapshot(run)
+
+    recovered_ids = await recover_stale_crawl_runs(
+        session,
+        stale_before=stale_before,
+        recovered_at=recovered_at,
+        error_message="stale crawl run recovered after 20 minutes",
+    )
+
+    await session.refresh(run)
+    assert recovered_ids == [run.id]
+    assert run.status == "failed"
+    assert run.error_message == "stale crawl run recovered after 20 minutes"
+    assert _as_utc(run.finished_at) == recovered_at
+    assert run.source == original["source"]
+    assert run.celery_task_id == original["celery_task_id"]
+    assert run.trigger_type == original["trigger_type"]
+    assert run.retry_of_run_id == original["retry_of_run_id"]
+    assert run.attempt_count == original["attempt_count"]
+    assert run.started_at == original["started_at"]
+    assert run.created_at == original["created_at"]
+    assert run.received == original["received"]
+    assert run.inserted == original["inserted"]
+    assert run.updated == original["updated"]
+    assert run.duplicates == original["duplicates"]
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_crawl_runs_is_idempotent(session):
+    stale_before = datetime(2026, 1, 1, 0, 20, tzinfo=timezone.utc)
+    first_recovered_at = datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc)
+    second_recovered_at = datetime(2026, 1, 1, 2, 0, tzinfo=timezone.utc)
+    run = await _create_recovery_run(
+        session,
+        status="queued",
+        celery_task_id="task-recover-idempotent-001",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+    first = await recover_stale_crawl_runs(
+        session,
+        stale_before=stale_before,
+        recovered_at=first_recovered_at,
+        error_message="stale crawl run recovered after 20 minutes",
+    )
+    await session.refresh(run)
+    first_finished_at = run.finished_at
+    second = await recover_stale_crawl_runs(
+        session,
+        stale_before=stale_before,
+        recovered_at=second_recovered_at,
+        error_message="stale crawl run recovered after 20 minutes",
+    )
+
+    await session.refresh(run)
+    assert first == [run.id]
+    assert second == []
+    assert _as_utc(first_finished_at) == first_recovered_at
+    assert run.finished_at == first_finished_at
 
 
 @pytest.mark.asyncio

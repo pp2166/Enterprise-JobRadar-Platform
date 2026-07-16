@@ -5,13 +5,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import CrawlRun
 
 
 ACTIVE_CRAWL_RUN_STATUSES = (
+    "queued",
+    "running",
+    "retrying",
+)
+
+STALE_CRAWL_RUN_STATUSES = (
     "queued",
     "running",
     "retrying",
@@ -188,6 +194,45 @@ async def list_crawl_runs(
         total=total or 0,
         records=list(records),
     )
+
+
+async def recover_stale_crawl_runs(
+    session: AsyncSession,
+    *,
+    stale_before: datetime,
+    recovered_at: datetime,
+    error_message: str,
+) -> list[int]:
+    stale_condition = or_(
+        and_(
+            CrawlRun.status == "queued",
+            CrawlRun.created_at < stale_before,
+        ),
+        and_(
+            CrawlRun.status.in_(("running", "retrying")),
+            func.coalesce(
+                CrawlRun.started_at,
+                CrawlRun.created_at,
+            )
+            < stale_before,
+        ),
+    )
+    stmt = (
+        update(CrawlRun)
+        .where(stale_condition)
+        .values(
+            status="failed",
+            error_message=error_message,
+            finished_at=recovered_at,
+        )
+        .returning(CrawlRun.id)
+        .execution_options(synchronize_session=False)
+    )
+
+    recovered_ids = (await session.scalars(stmt)).all()
+    await session.commit()
+
+    return sorted(recovered_ids)
 
 
 async def mark_crawl_run_running(
