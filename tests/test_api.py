@@ -78,6 +78,34 @@ async def _create_crawl_run(
     return run
 
 
+def _crawl_run_snapshot(run: CrawlRun) -> dict[str, object]:
+    return {
+        "source": run.source,
+        "status": run.status,
+        "celery_task_id": run.celery_task_id,
+        "retry_of_run_id": run.retry_of_run_id,
+        "trigger_type": run.trigger_type,
+        "attempt_count": run.attempt_count,
+        "received": run.received,
+        "inserted": run.inserted,
+        "updated": run.updated,
+        "duplicates": run.duplicates,
+        "error_message": run.error_message,
+        "created_at": run.created_at,
+        "started_at": run.started_at,
+        "finished_at": run.finished_at,
+    }
+
+
+def _active_conflict_detail(run: CrawlRun) -> dict[str, object]:
+    return {
+        "code": "ACTIVE_CRAWL_RUN_EXISTS",
+        "message": f"active crawl run exists for source: {run.source}",
+        "source": run.source,
+        "active_run_id": run.id,
+    }
+
+
 @pytest.mark.asyncio
 class TestHealth:
     async def test_healthz_returns_ok(self, client: AsyncClient):
@@ -451,6 +479,81 @@ class TestAdminEndpoints:
             "trigger_type": parent.trigger_type,
         } == original
 
+    async def test_retry_failed_crawl_run_rejects_same_source_active_run(
+        self,
+        client: AsyncClient,
+        monkeypatch,
+        session: AsyncSession,
+    ):
+        dispatched: list[tuple[list[str], str]] = []
+        parent = await _create_crawl_run(
+            session,
+            source="remoteok",
+            status="failed",
+            celery_task_id="task-api-retry-active-parent-001",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        active = await _create_crawl_run(
+            session,
+            source="remoteok",
+            status="queued",
+            celery_task_id="task-api-retry-active-current-001",
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+        parent_original = _crawl_run_snapshot(parent)
+        active_original = _crawl_run_snapshot(active)
+        monkeypatch.setattr(
+            "app.api.admin.crawl_source.apply_async",
+            lambda args, task_id: dispatched.append((args, task_id)),
+        )
+
+        r = await client.post(f"/admin/crawl-runs/{parent.id}/retry")
+
+        children = (
+            await session.scalars(
+                select(CrawlRun).where(CrawlRun.retry_of_run_id == parent.id)
+            )
+        ).all()
+        await session.refresh(parent)
+        await session.refresh(active)
+
+        assert r.status_code == 409
+        assert r.json()["detail"] == _active_conflict_detail(active)
+        assert dispatched == []
+        assert children == []
+        assert _crawl_run_snapshot(parent) == parent_original
+        assert _crawl_run_snapshot(active) == active_original
+
+    async def test_retry_non_failed_parent_prefers_not_retryable_over_activity(
+        self,
+        client: AsyncClient,
+        session: AsyncSession,
+    ):
+        parent = await _create_crawl_run(
+            session,
+            source="remoteok",
+            status="succeeded",
+            celery_task_id="task-api-retry-priority-parent-001",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        await _create_crawl_run(
+            session,
+            source="remoteok",
+            status="queued",
+            celery_task_id="task-api-retry-priority-active-001",
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+
+        r = await client.post(f"/admin/crawl-runs/{parent.id}/retry")
+
+        assert r.status_code == 409
+        assert r.json()["detail"] == {
+            "code": "CRAWL_RUN_NOT_RETRYABLE",
+            "message": f"crawl run is not retryable: {parent.id}",
+            "run_id": parent.id,
+            "status": "succeeded",
+        }
+
     @pytest.mark.parametrize("status", ["queued", "running", "retrying", "succeeded"])
     async def test_retry_crawl_run_rejects_non_failed_status(
         self,
@@ -543,6 +646,97 @@ class TestAdminEndpoints:
         runs = (await session.scalars(select(CrawlRun))).all()
         assert runs == []
 
+    @pytest.mark.parametrize("status", ["queued", "running", "retrying"])
+    async def test_crawl_specific_source_rejects_same_source_active_run(
+        self,
+        client: AsyncClient,
+        monkeypatch,
+        session: AsyncSession,
+        status: str,
+    ):
+        dispatched: list[tuple[list[str], str]] = []
+        active = await _create_crawl_run(
+            session,
+            source="remoteok",
+            status=status,
+            celery_task_id=f"task-api-active-conflict-{status}-001",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        original = _crawl_run_snapshot(active)
+        before = (await session.scalars(select(CrawlRun))).all()
+        monkeypatch.setattr(
+            "app.api.admin.crawl_source.apply_async",
+            lambda args, task_id: dispatched.append((args, task_id)),
+        )
+
+        r = await client.post("/admin/crawl", json={"source": "remoteok"})
+
+        after = (await session.scalars(select(CrawlRun))).all()
+        await session.refresh(active)
+
+        assert r.status_code == 409
+        assert r.json()["detail"] == _active_conflict_detail(active)
+        assert dispatched == []
+        assert len(after) == len(before)
+        assert _crawl_run_snapshot(active) == original
+
+    @pytest.mark.parametrize("status", ["failed", "succeeded"])
+    async def test_crawl_specific_source_allows_inactive_history(
+        self,
+        client: AsyncClient,
+        monkeypatch,
+        session: AsyncSession,
+        status: str,
+    ):
+        dispatched: list[tuple[list[str], str]] = []
+        await _create_crawl_run(
+            session,
+            source="remoteok",
+            status=status,
+            celery_task_id=f"task-api-inactive-history-{status}-001",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        monkeypatch.setattr(
+            "app.api.admin.crawl_source.apply_async",
+            lambda args, task_id: dispatched.append((args, task_id)),
+        )
+
+        r = await client.post("/admin/crawl", json={"source": "remoteok"})
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["dispatched"] == ["remoteok"]
+        assert dispatched == [(["remoteok"], body["runs"][0]["celery_task_id"])]
+
+        runs = (await session.scalars(select(CrawlRun))).all()
+        assert len(runs) == 2
+
+    async def test_crawl_specific_source_allows_different_source_active_run(
+        self,
+        client: AsyncClient,
+        monkeypatch,
+        session: AsyncSession,
+    ):
+        dispatched: list[tuple[list[str], str]] = []
+        await _create_crawl_run(
+            session,
+            source="weworkremotely",
+            status="queued",
+            celery_task_id="task-api-different-source-active-001",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        monkeypatch.setattr(
+            "app.api.admin.crawl_source.apply_async",
+            lambda args, task_id: dispatched.append((args, task_id)),
+        )
+
+        r = await client.post("/admin/crawl", json={"source": "remoteok"})
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["dispatched"] == ["remoteok"]
+        assert dispatched == [(["remoteok"], body["runs"][0]["celery_task_id"])]
+
     async def test_crawl_specific_source_dispatches(
         self,
         client: AsyncClient,
@@ -627,6 +821,38 @@ class TestAdminEndpoints:
         runs = (await session.scalars(select(CrawlRun))).all()
         assert len(runs) == len(source_names)
         assert {run.source for run in runs} == set(source_names)
+
+    async def test_crawl_all_rejects_before_any_dispatch_when_source_active(
+        self,
+        client: AsyncClient,
+        monkeypatch,
+        session: AsyncSession,
+    ):
+        dispatched: list[tuple[list[str], str]] = []
+        active = await _create_crawl_run(
+            session,
+            source=registry.names()[0],
+            status="queued",
+            celery_task_id="task-api-crawl-all-active-001",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        original = _crawl_run_snapshot(active)
+        before = (await session.scalars(select(CrawlRun))).all()
+        monkeypatch.setattr(
+            "app.api.admin.crawl_source.apply_async",
+            lambda args, task_id: dispatched.append((args, task_id)),
+        )
+
+        r = await client.post("/admin/crawl", json={})
+
+        after = (await session.scalars(select(CrawlRun))).all()
+        await session.refresh(active)
+
+        assert r.status_code == 409
+        assert r.json()["detail"] == _active_conflict_detail(active)
+        assert dispatched == []
+        assert len(after) == len(before)
+        assert _crawl_run_snapshot(active) == original
 
     async def test_crawl_dispatch_failure_marks_run_failed(
         self,

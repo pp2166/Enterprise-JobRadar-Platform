@@ -10,10 +10,12 @@ from app.crawlers import registry
 from app.database import get_session
 from app.schemas import CrawlRequest, CrawlResponse, CrawlRunListResponse, CrawlRunOut
 from app.services.crawl_runs import (
+    ActiveCrawlRunExistsError,
     CrawlRunNotFoundError,
     CrawlRunNotRetryableError,
-    create_crawl_run,
+    create_crawl_run_if_inactive,
     create_retry_crawl_run,
+    find_active_crawl_run,
     get_crawl_run,
     list_crawl_runs,
     mark_crawl_run_failed,
@@ -21,6 +23,17 @@ from app.services.crawl_runs import (
 from app.workers.tasks import crawl_source
 
 router = APIRouter()
+
+
+def _active_crawl_run_conflict_detail(
+    exc: ActiveCrawlRunExistsError,
+) -> dict:
+    return {
+        "code": "ACTIVE_CRAWL_RUN_EXISTS",
+        "message": str(exc),
+        "source": exc.source,
+        "active_run_id": exc.active_run_id,
+    }
 
 
 @router.get("/sources")
@@ -92,6 +105,11 @@ async def retry_admin_crawl_run(
                 "status": exc.status,
             },
         ) from exc
+    except ActiveCrawlRunExistsError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=_active_crawl_run_conflict_detail(exc),
+        ) from exc
 
     try:
         crawl_source.apply_async(
@@ -123,17 +141,36 @@ async def trigger_crawl(
         sources = [req.source]
     else:
         sources = registry.names()
+        # Application-level best-effort precheck: creation rechecks each source,
+        # but concurrent requests can still race without a database-level lock.
+        for source in sources:
+            active_run = await find_active_crawl_run(session, source=source)
+            if active_run is not None:
+                exc = ActiveCrawlRunExistsError(
+                    source=source,
+                    active_run_id=active_run.id,
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail=_active_crawl_run_conflict_detail(exc),
+                )
 
     dispatched = []
     runs = []
     for source in sources:
         task_id = str(uuid4())
-        run = await create_crawl_run(
-            session,
-            source=source,
-            celery_task_id=task_id,
-            trigger_type="api",
-        )
+        try:
+            run = await create_crawl_run_if_inactive(
+                session,
+                source=source,
+                celery_task_id=task_id,
+                trigger_type="api",
+            )
+        except ActiveCrawlRunExistsError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=_active_crawl_run_conflict_detail(exc),
+            ) from exc
 
         try:
             crawl_source.apply_async(
