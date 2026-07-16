@@ -11,7 +11,9 @@ from app.database import get_session
 from app.schemas import CrawlRequest, CrawlResponse, CrawlRunListResponse, CrawlRunOut
 from app.services.crawl_runs import (
     CrawlRunNotFoundError,
+    CrawlRunNotRetryableError,
     create_crawl_run,
+    create_retry_crawl_run,
     get_crawl_run,
     list_crawl_runs,
     mark_crawl_run_failed,
@@ -64,6 +66,50 @@ async def get_admin_crawl_run(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     return CrawlRunOut.model_validate(run)
+
+
+@router.post("/crawl-runs/{run_id}/retry", response_model=CrawlRunOut)
+async def retry_admin_crawl_run(
+    run_id: int,
+    session: AsyncSession = Depends(get_session),
+) -> CrawlRunOut:
+    task_id = str(uuid4())
+    try:
+        retry_run = await create_retry_crawl_run(
+            session,
+            run_id=run_id,
+            celery_task_id=task_id,
+        )
+    except CrawlRunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except CrawlRunNotRetryableError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "CRAWL_RUN_NOT_RETRYABLE",
+                "message": str(exc),
+                "run_id": exc.run_id,
+                "status": exc.status,
+            },
+        ) from exc
+
+    try:
+        crawl_source.apply_async(
+            args=[retry_run.source],
+            task_id=task_id,
+        )
+    except Exception as exc:
+        await mark_crawl_run_failed(
+            session,
+            run_id=retry_run.id,
+            error_message=f"dispatch failed: {exc}",
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=f"failed to dispatch retry crawl run: {retry_run.id}",
+        ) from exc
+
+    return CrawlRunOut.model_validate(retry_run)
 
 
 @router.post("/crawl", response_model=CrawlResponse)

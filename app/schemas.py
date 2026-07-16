@@ -44,6 +44,8 @@ class CrawlRunOut(BaseModel):
     source: str
     status: str
     celery_task_id: str
+    retry_of_run_id: int | None
+    trigger_type: str
     attempt_count: int
     received: int
     inserted: int

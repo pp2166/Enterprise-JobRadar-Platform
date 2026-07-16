@@ -61,12 +61,16 @@ async def _create_crawl_run(
     status: str,
     celery_task_id: str,
     created_at: datetime,
+    trigger_type: str = "api",
+    retry_of_run_id: int | None = None,
 ) -> CrawlRun:
     run = CrawlRun(
         source=source,
         status=status,
         celery_task_id=celery_task_id,
         created_at=created_at,
+        trigger_type=trigger_type,
+        retry_of_run_id=retry_of_run_id,
     )
     session.add(run)
     await session.commit()
@@ -210,6 +214,8 @@ class TestAdminEndpoints:
         assert r.status_code == 200
         body = r.json()
         assert body["total"] == 3
+        assert body["runs"][0]["trigger_type"] == "api"
+        assert body["runs"][0]["retry_of_run_id"] is None
         assert [run["run_id"] for run in body["runs"]] == [
             newer_second.id,
             newer_first.id,
@@ -385,6 +391,8 @@ class TestAdminEndpoints:
         assert body["source"] == "remoteok"
         assert body["status"] == "succeeded"
         assert body["celery_task_id"] == "task-api-get-001"
+        assert body["trigger_type"] == "api"
+        assert body["retry_of_run_id"] is None
 
     async def test_get_crawl_run_missing_returns_404(self, client: AsyncClient):
         r = await client.get("/admin/crawl-runs/999999")
@@ -394,6 +402,126 @@ class TestAdminEndpoints:
     async def test_get_crawl_run_non_integer_rejected(self, client: AsyncClient):
         r = await client.get("/admin/crawl-runs/not-an-int")
         assert r.status_code == 422
+
+    async def test_retry_failed_crawl_run_dispatches_new_run(
+        self,
+        client: AsyncClient,
+        monkeypatch,
+        session: AsyncSession,
+    ):
+        dispatched: list[tuple[list[str], str]] = []
+
+        def fake_apply_async(args, task_id):
+            dispatched.append((args, task_id))
+
+        parent = await _create_crawl_run(
+            session,
+            source="remoteok",
+            status="failed",
+            celery_task_id="task-api-retry-parent-001",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        original = {
+            "id": parent.id,
+            "source": parent.source,
+            "status": parent.status,
+            "celery_task_id": parent.celery_task_id,
+            "retry_of_run_id": parent.retry_of_run_id,
+            "trigger_type": parent.trigger_type,
+        }
+        monkeypatch.setattr("app.api.admin.crawl_source.apply_async", fake_apply_async)
+
+        r = await client.post(f"/admin/crawl-runs/{parent.id}/retry")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["run_id"] != parent.id
+        assert body["status"] == "queued"
+        assert body["source"] == "remoteok"
+        assert body["trigger_type"] == "manual"
+        assert body["retry_of_run_id"] == parent.id
+        assert dispatched == [(["remoteok"], body["celery_task_id"])]
+
+        await session.refresh(parent)
+        assert {
+            "id": parent.id,
+            "source": parent.source,
+            "status": parent.status,
+            "celery_task_id": parent.celery_task_id,
+            "retry_of_run_id": parent.retry_of_run_id,
+            "trigger_type": parent.trigger_type,
+        } == original
+
+    @pytest.mark.parametrize("status", ["queued", "running", "retrying", "succeeded"])
+    async def test_retry_crawl_run_rejects_non_failed_status(
+        self,
+        client: AsyncClient,
+        session: AsyncSession,
+        status: str,
+    ):
+        run = await _create_crawl_run(
+            session,
+            source="remoteok",
+            status=status,
+            celery_task_id=f"task-api-retry-{status}-001",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+
+        r = await client.post(f"/admin/crawl-runs/{run.id}/retry")
+        assert r.status_code == 409
+        assert r.json()["detail"] == {
+            "code": "CRAWL_RUN_NOT_RETRYABLE",
+            "message": f"crawl run is not retryable: {run.id}",
+            "run_id": run.id,
+            "status": status,
+        }
+
+    async def test_retry_crawl_run_missing_returns_404(self, client: AsyncClient):
+        r = await client.post("/admin/crawl-runs/999999/retry")
+        assert r.status_code == 404
+        assert r.json()["detail"] == "crawl run not found: 999999"
+
+    async def test_retry_crawl_run_non_integer_rejected(self, client: AsyncClient):
+        r = await client.post("/admin/crawl-runs/not-an-int/retry")
+        assert r.status_code == 422
+
+    async def test_retry_crawl_run_dispatch_failure_marks_new_run_failed(
+        self,
+        client: AsyncClient,
+        monkeypatch,
+        session: AsyncSession,
+    ):
+        def fake_apply_async(args, task_id):
+            raise RuntimeError("broker unavailable")
+
+        parent = await _create_crawl_run(
+            session,
+            source="remoteok",
+            status="failed",
+            celery_task_id="task-api-retry-fail-parent-001",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        monkeypatch.setattr("app.api.admin.crawl_source.apply_async", fake_apply_async)
+
+        r = await client.post(f"/admin/crawl-runs/{parent.id}/retry")
+        assert r.status_code == 503
+
+        children = (
+            await session.scalars(
+                select(CrawlRun).where(CrawlRun.retry_of_run_id == parent.id)
+            )
+        ).all()
+        assert len(children) == 1
+        child = children[0]
+        assert r.json()["detail"] == f"failed to dispatch retry crawl run: {child.id}"
+        assert child.status == "failed"
+        assert child.trigger_type == "manual"
+        assert child.retry_of_run_id == parent.id
+        assert child.error_message is not None
+        assert "dispatch failed: broker unavailable" in child.error_message
+
+        await session.refresh(parent)
+        assert parent.status == "failed"
+        assert parent.retry_of_run_id is None
 
     async def test_crawl_unknown_source_rejected(
         self,
@@ -437,6 +565,8 @@ class TestAdminEndpoints:
         assert run["source"] == "remoteok"
         assert run["status"] == "queued"
         assert run["attempt_count"] == 0
+        assert run["trigger_type"] == "api"
+        assert run["retry_of_run_id"] is None
         assert isinstance(run["run_id"], int)
         assert dispatched == [(["remoteok"], run["celery_task_id"])]
 

@@ -97,6 +97,8 @@ class TestCrawlRequestResponse:
             "source": "remoteok",
             "status": "succeeded",
             "celery_task_id": "task-1",
+            "retry_of_run_id": None,
+            "trigger_type": "api",
             "attempt_count": 2,
             "received": 10,
             "inserted": 7,
@@ -142,6 +144,20 @@ class TestCrawlRequestResponse:
         dumped = run.model_dump()
         assert dumped["run_id"] == 42
         assert "id" not in dumped
+
+    def test_run_dump_contains_retry_metadata(self):
+        run = CrawlRunOut(**self._valid_run_payload(
+            retry_of_run_id=5,
+            trigger_type="manual",
+        ))
+        dumped = run.model_dump()
+        assert dumped["retry_of_run_id"] == 5
+        assert dumped["trigger_type"] == "manual"
+
+    def test_run_out_accepts_null_retry_parent(self):
+        run = CrawlRunOut(**self._valid_run_payload(retry_of_run_id=None))
+        assert run.retry_of_run_id is None
+        assert run.trigger_type == "api"
 
     def test_list_response_serializes_multiple_runs(self):
         first = CrawlRunOut(**self._valid_run_payload(id=1, celery_task_id="task-1"))
