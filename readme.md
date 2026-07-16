@@ -1,372 +1,458 @@
-<p align="center">
-  <img src="assets/banner.png" alt="Talash — Self-hostable job aggregation engine" width="100%">
-</p>
+# JobRadar：分布式职位聚合与采集任务治理平台
 
 <p align="center">
-  <strong>तलाश (talāsh)</strong> — <em>Hindi for "search"</em>
+  <img src="assets/banner.png" alt="JobRadar - Distributed job aggregation and crawl task governance platform" width="100%">
 </p>
 
 <p align="center">
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.11+"></a>
-  <a href="https://github.com/iamrahulroyy/talash/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/iamrahulroyy/talash/ci.yml?branch=main&style=for-the-badge&label=CI" alt="CI"></a>
+  <a href="https://github.com/pp2166/Enterprise-JobRadar-Platform/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/pp2166/Enterprise-JobRadar-Platform/ci.yml?branch=main&style=for-the-badge&label=CI" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT License"></a>
-  <a href="https://github.com/iamrahulroyy/talash/stargazers"><img src="https://img.shields.io/github/stars/iamrahulroyy/talash?style=for-the-badge&color=gold" alt="Stars"></a>
 </p>
 
-<p align="center">
-  The open-source job aggregation engine.<br>
-  Crawls remote-first boards in parallel, normalizes everything into a single schema,<br>
-  dedupes reposts with SimHash, and serves blazing-fast Postgres full-text search<br>
-  behind a clean FastAPI + minimal UI.
-</p>
+JobRadar 是一个基于 FastAPI、PostgreSQL、Celery 和 Redis 的职位聚合与采集任务治理项目。系统聚合 RemoteOK、WeWorkRemotely 等公开职位来源，支持职位标准化、SimHash 去重、PostgreSQL 全文检索，并围绕 CrawlRun 补充任务生命周期追踪、失败重试、同源防重、任务超时和卡死恢复。
 
-<p align="center">
-  <code>FastAPI</code> · <code>SQLAlchemy 2.0 async</code> · <code>PostgreSQL FTS</code> · <code>Celery + Redis</code> · <code>Docker Compose</code> · <code>SimHash dedup</code> · <code>Pluggable crawlers</code>
-</p>
+本项目的求职展示重点是：在上游 Talash 的职位聚合基础上，继续实现分布式采集任务的运行可观测性和失败治理能力，让一次采集从调度、派发、执行、重试到异常恢复都有可查询、可追踪的状态闭环。
 
----
+## 项目定位
 
-## Why Talash?
+JobRadar 面向“远程职位聚合 + 后台采集任务治理”场景：
 
-Existing job boards are walled gardens, slow, and full of reposts. Talash is
-a **self-hostable, developer-first** alternative:
+- 聚合多个公开职位来源，统一标准化为内部职位模型。
+- 使用 SimHash 识别近重复职位，减少重复岗位干扰。
+- 使用 PostgreSQL FTS 提供搜索、过滤和分页。
+- 使用 Celery Beat、Celery Worker 和 Redis 执行异步采集。
+- 使用 CrawlRun 记录每次采集任务的状态、统计和错误信息。
+- 使用 Failure Task Management 处理失败重试、同源防重、超时和 stale 任务恢复。
 
-- 🔌 **Add a new source in ~40 lines of Python.**
-- 🧬 Near-duplicate listings across boards collapse automatically via **64-bit SimHash**.
-- 🔍 Search is **Postgres native** (tsvector + GIN + weighted rank + recency decay) —
-  no Elasticsearch cluster needed until you actually have one.
-- ⚡ Async crawlers, async API, async SQLAlchemy — the whole stack breathes.
-- 🐳 Everything runs on `docker compose up`.
-
----
-
-## Architecture
+## 系统架构
 
 ```text
-               ┌──────────────┐
-               │  Celery beat │  cron: every 30 min / source
-               └──────┬───────┘
-                      │ enqueue
-                      ▼
-  ┌────────────┐   ┌──────────┐   ┌──────────────────────────┐
-  │  Crawlers  │◀──│  Redis   │──▶│  Celery worker (asyncio) │
-  │  RemoteOK  │   └──────────┘   │  fetch → normalize →     │
-  │  WWR RSS   │                  │  SimHash dedup → upsert  │
-  └────────────┘                  └──────────────┬───────────┘
-                                                 │
-                                          ┌──────▼──────┐
-                                          │  Postgres   │  tsvector + GIN
-                                          └──────┬──────┘
-                                                 │
-                                 ┌───────────────▼───────────────┐
-                                 │  FastAPI                       │
-                                 │    GET  /search   (FTS + rank) │
-                                 │    GET  /jobs/{id}             │
-                                 │    POST /admin/crawl           │
-                                 │    GET  /                      │  minimal UI
-                                 └────────────────────────────────┘
+Celery Beat / Admin API / crawl_all
+        |
+        v
+dispatch_crawl_source / POST /admin/crawl
+        |
+        v
+CrawlRun queued -> Redis -> crawl_source Worker
+        |
+        v
+running -> crawler.fetch() -> normalize -> ingest_jobs
+        |
+        v
+succeeded / retrying / failed
+        |
+        v
+GET /admin/crawl-runs / GET /admin/crawl-runs/{run_id}
 ```
 
-- **Crawlers** are async generators yielding `NormalizedJob`. Adding a source
-  means implementing `BaseCrawler.fetch()` and registering the instance.
-- **Dedup** — 64-bit SimHash over `(title, company, first N words of description)`.
-  Exact `(source, source_id)` collisions upsert; near matches (Hamming ≤ threshold)
-  against any existing job are dropped.
-- **Ranking (Postgres)**:
-  `ts_rank_cd + title-match boost + exp(-age_days / 14)` — half-life ≈ 14 days.
-  The search layer is isolated in `app/services/search.py`, so swapping in
-  Elasticsearch later requires no change to ingest.
+核心数据流：
 
----
+- `POST /admin/crawl` 或 Celery Beat 触发采集。
+- 系统创建 `queued` CrawlRun，并使用预生成的 `celery_task_id` 派发真实采集任务。
+- Worker 根据 `celery_task_id` 复用 CrawlRun，进入 `running`。
+- 采集完成后写入 `received`、`inserted`、`updated`、`duplicates`。
+- 普通异常进入 `retrying` 或最终 `failed`。
+- 软超时和 stale recovery 会将异常任务标记为 `failed`。
 
-## ✅ Features
+## 核心能力
 
-### Crawling & ingestion
+### 职位采集与标准化
 
-- Async `BaseCrawler` with shared HTTPX client, per-source concurrency
-  semaphore, and 3-attempt exponential backoff.
-- RemoteOK crawler (public JSON feed).
-- We Work Remotely crawler (5 category RSS feeds).
-- Pluggable crawler registry — one entry point to add a new source.
-- Normalization: HTML stripping (selectolax), whitespace squishing,
-  salary regex with `$`/`k`/comma-aware parsing, experience level inference
-  (junior/mid/senior), timezone-aware `posted_at`, remote/anywhere detection.
-- 64-bit SimHash near-duplicate detection, stored as signed BIGINT
-  (Postgres-compatible). Configurable Hamming threshold.
-- Upsert on `(source, source_id)` — crawlers can be re-run safely.
-- Ingest stats (`received / inserted / updated / duplicates`).
+- RemoteOK crawler：读取公开 JSON feed。
+- WeWorkRemotely crawler：读取多个 RSS category feed。
+- 每个 crawler 输出 `NormalizedJob`。
+- 标准化内容包括 title、company、location、remote、salary、tags、posted_at 等字段。
+- 入库使用 `(source, source_id)` upsert，重复采集可以安全更新已有职位。
 
-### API & search
+### SimHash 去重
 
-- `GET /search` — free text + filters + pagination. Supports quoted
-  phrases, `AND` / `OR`, and `-` negation via `websearch_to_tsquery`.
-- `GET /jobs/{id}` — single job detail with 404.
-- `GET /admin/sources` — list registered crawlers.
-- `POST /admin/crawl` — trigger one or all crawlers.
-- `GET /healthz` — liveness probe.
-- OpenAPI + Swagger UI at `/docs`.
-- Ranked search: relevance + title-boost + recency decay (14-day half-life).
-- Pagination with `page_size` clamped to 100.
+- 使用 64-bit SimHash 对职位标题、公司和描述进行近重复判断。
+- 精确重复通过 `(source, source_id)` upsert 处理。
+- 近重复职位根据 Hamming distance 阈值识别并计入 duplicates。
 
-### Scheduling & infrastructure
+### PostgreSQL 全文检索
 
-- Celery worker + Celery beat for automated every-30-min crawls per source.
-- Task retries (max 3, `acks_late`, `reject_on_worker_lost`).
-- Idempotent schema bootstrap — no Alembic required for MVP.
-- Postgres trigger that maintains a weighted tsvector
-  (title=A, company=B, tags=B, location=C, description=D).
-- Full `docker-compose.yml`: Postgres + Redis + API + worker + beat.
-- Dev task runner via `uv` + `taskipy`.
+- 使用 PostgreSQL `tsvector`、GIN index 和 `ts_rank_cd`。
+- 支持 `GET /search` 的关键词、source、company、location、remote、experience、page、page_size 查询。
+- 排序结合文本相关性、标题命中加权和时间衰减。
 
-### Frontend
+### CrawlRun 可观测性
 
-- Minimal zero-build single-page UI (static HTML/CSS/JS) with live search,
-  filters (location, remote, experience), and pagination.
+CrawlRun 记录每次采集运行：
 
-### Developer experience
+- `run_id`
+- `source`
+- `status`
+- `celery_task_id`
+- `retry_of_run_id`
+- `trigger_type`
+- `attempt_count`
+- `received`
+- `inserted`
+- `updated`
+- `duplicates`
+- `error_message`
+- `created_at`
+- `started_at`
+- `finished_at`
 
-- **160-test** production suite covering unit / integration / edge cases
-  (see [Test suite](#-test-suite)).
-- Ruff lint + format.
-- SQLite-compatible models so tests run without Postgres.
-- GitHub Actions CI (lint + test on every push).
+支持：
 
----
+- `GET /admin/crawl-runs`
+- `GET /admin/crawl-runs/{run_id}`
+- source/status 筛选
+- page/page_size 分页
 
-## 🚀 Quickstart
+### Failure Task Management
 
-### Docker (recommended)
+Failure Task Management 覆盖 2A 到 2D：
+
+- 手动失败重试
+- 同源活动任务防重
+- Celery 软硬超时
+- stale CrawlRun 恢复
+
+## 失败任务治理
+
+### 手动失败重试
+
+接口：
+
+```text
+POST /admin/crawl-runs/{run_id}/retry
+```
+
+规则：
+
+- 仅 `failed` 状态允许重试。
+- 原 failed CrawlRun 保持不变。
+- 重试会创建新的子 CrawlRun。
+- 新记录 `trigger_type == "manual"`。
+- 新记录 `retry_of_run_id` 指向父任务。
+- 新记录使用新的 `celery_task_id`。
+- 非 failed 父任务返回结构化 HTTP 409，`code == "CRAWL_RUN_NOT_RETRYABLE"`。
+
+### 同源活动任务防重
+
+活动状态：
+
+- `queued`
+- `running`
+- `retrying`
+
+覆盖入口：
+
+- `POST /admin/crawl`
+- `POST /admin/crawl-runs/{run_id}/retry`
+- Celery Beat
+- `crawl_all`
+
+实现方式：
+
+- `find_active_crawl_run` 查询同源活动 CrawlRun。
+- `create_crawl_run_if_inactive` 在创建前做应用层检查。
+- Celery Beat 和 `crawl_all` 统一经过 `dispatch_crawl_source`。
+- 冲突返回 HTTP 409 或 Dispatcher skipped 结果。
+
+第一版是应用层 best-effort 防重，不声明强一致。查询和创建之间仍存在并发窗口。直接 `crawl_source.delay()` 保留为内部兼容入口，Worker 找不到预建 CrawlRun 时会自动创建 `trigger_type == "direct"` 的记录。
+
+### Celery 软硬超时
+
+`crawl_source` 专属配置：
+
+- `max_retries == 3`
+- `default_retry_delay == 60`
+- `soft_time_limit == 120`
+- `time_limit == 150`
+
+普通异常：
+
+- 有剩余重试次数时，CrawlRun 进入 `retrying`，并调用 `self.retry()`。
+- 重试耗尽时，CrawlRun 进入 `failed`。
+- Celery retry 复用当前 task id，Worker 会继续复用同一条 CrawlRun。
+
+软超时：
+
+- `SoftTimeLimitExceeded` 直接标记为 `failed`。
+- `error_message == "crawl soft time limit exceeded after 120 seconds"`。
+- 不进入普通 retrying/self.retry 路径。
+
+硬超时：
+
+- `time_limit == 150` 用作 Worker 硬兜底。
+- 硬超时可能无法执行 Python 清理逻辑，遗留状态由 stale recovery 兜底。
+
+### stale recovery
+
+Celery Beat 每 5 分钟执行：
+
+```text
+app.workers.tasks.recover_stale_crawl_runs
+```
+
+阈值：
+
+- 20 分钟
+
+判断规则：
+
+- `queued` 使用 `created_at`。
+- `running` / `retrying` 优先使用 `started_at`。
+- `started_at` 为空时回退 `created_at`。
+
+恢复方式：
+
+- 调用 `recover_stale_crawl_runs`。
+- 使用单条条件 `UPDATE ... RETURNING`。
+- 将 stale 活动记录标记为 `failed`。
+- `error_message == "stale crawl run recovered after 20 minutes"`。
+- 返回 `recovered_count` 和 `recovered_run_ids`。
+- 重复执行具备幂等性。
+
+## 技术栈
+
+- Python 3.11
+- FastAPI
+- SQLAlchemy 2.0 async
+- Pydantic v2
+- PostgreSQL 16
+- PostgreSQL FTS
+- Redis 7
+- Celery 5.6.3
+- Docker Compose
+- HTTPX
+- selectolax
+- SimHash
+- pytest
+- Ruff
+- uv
+
+## 快速启动
+
+### Docker Compose
 
 ```bash
-git clone https://github.com/iamrahulroyy/talash.git
-cd talash
+git clone https://github.com/pp2166/Enterprise-JobRadar-Platform.git
+cd Enterprise-JobRadar-Platform
 cp .env.example .env
 docker compose up --build
 ```
 
-- **UI**: http://localhost:8000/
-- **API docs**: http://localhost:8000/docs
-- **Trigger a crawl**:
+访问：
 
-  ```bash
-  curl -X POST http://localhost:8000/admin/crawl \
-       -H 'content-type: application/json' -d '{}'
-  ```
+- UI: http://localhost:8000/
+- API docs: http://localhost:8000/docs
+- Health check: http://localhost:8000/healthz
 
-Celery beat fires crawls every 30 minutes automatically.
+触发采集：
 
-### Local (no Docker)
+```bash
+curl -X POST http://localhost:8000/admin/crawl \
+     -H "content-type: application/json" \
+     -d '{"source":"remoteok"}'
+```
 
-Dependencies and tasks are managed with [uv](https://docs.astral.sh/uv/) and
-[taskipy](https://github.com/taskipy/taskipy). Postgres 14+ and Redis 7+ must
-be reachable.
+### 本地开发
+
+需要本地可访问 PostgreSQL 和 Redis。
 
 ```bash
 uv sync
-cp .env.example .env    # edit DATABASE_URL / REDIS_URL if needed
+cp .env.example .env
 
-uv run task api         # terminal 1 — FastAPI
-uv run task worker      # terminal 2 — Celery worker
-uv run task beat        # terminal 3 — Celery beat (optional)
+uv run task api
+uv run task worker
+uv run task beat
 ```
 
----
+常用命令：
 
-## 🛠️ Dev tasks
+| Command | 说明 |
+| --- | --- |
+| `uv run task api` | 启动 FastAPI |
+| `uv run task worker` | 启动 Celery Worker |
+| `uv run task beat` | 启动 Celery Beat |
+| `uv run pytest -q` | 运行测试 |
+| `uv run ruff check .` | 运行 Ruff |
+| `docker compose up --build` | 启动完整环境 |
 
-| Command              | What it does                                |
-|----------------------|---------------------------------------------|
-| `uv run task api`    | FastAPI dev server (`uvicorn --reload`)      |
-| `uv run task worker` | Celery worker                               |
-| `uv run task beat`   | Celery beat scheduler                       |
-| `uv run task test`   | `pytest -q`                                 |
-| `uv run task lint`   | `ruff check`                                |
-| `uv run task fmt`    | `ruff format`                               |
-| `uv run task up`     | `docker compose up --build`                 |
-| `uv run task down`   | `docker compose down`                       |
-| `uv run task crawl`  | POST `/admin/crawl` to trigger all crawlers |
-
----
-
-## 📡 API
+## API
 
 ### `GET /search`
 
-| Name         | Type    | Notes                                         |
-|--------------|---------|-----------------------------------------------|
-| `q`          | string  | free text; supports `"phrase"`, `AND/OR`, `-` |
-| `location`   | string  | substring match                               |
-| `remote`     | bool    | `true` / `false`                              |
-| `experience` | enum    | `junior` \| `mid` \| `senior`                 |
-| `company`    | string  | substring match                               |
-| `source`     | string  | e.g. `remoteok`, `weworkremotely`             |
-| `page`       | int     | default 1                                     |
-| `page_size`  | int     | default 20, max 100                           |
+支持参数：
+
+- `q`
+- `location`
+- `remote`
+- `experience`
+- `company`
+- `source`
+- `page`
+- `page_size`
+
+返回结构：
 
 ```json
 {
   "total": 42,
   "page": 1,
   "page_size": 20,
-  "results": [ { "id": 1, "title": "…", "company": "…", "...": "..." } ]
+  "results": []
 }
 ```
 
 ### `POST /admin/crawl`
 
+请求：
+
 ```json
-{ "source": "remoteok" }   // specific source
-{}                          // all registered sources
+{ "source": "remoteok" }
 ```
 
-Returns `{ "dispatched": ["remoteok", ...] }`.
+或触发全部来源：
+
+```json
+{}
+```
+
+响应中的 CrawlRun ID 字段为 `run_id`，与 `CrawlRunOut` 保持一致：
+
+```json
+{
+  "dispatched": ["remoteok"],
+  "runs": [
+    {
+      "run_id": 1,
+      "source": "remoteok",
+      "status": "queued",
+      "celery_task_id": "generated-task-id",
+      "retry_of_run_id": null,
+      "trigger_type": "api",
+      "attempt_count": 0,
+      "received": 0,
+      "inserted": 0,
+      "updated": 0,
+      "duplicates": 0,
+      "error_message": null,
+      "created_at": "2026-01-01T00:00:00Z",
+      "started_at": null,
+      "finished_at": null
+    }
+  ]
+}
+```
+
+### `GET /admin/crawl-runs`
+
+查询 CrawlRun 列表。
+
+参数：
+
+- `source`
+- `status`
+- `page`
+- `page_size`
+
+响应：
+
+```json
+{
+  "total": 1,
+  "page": 1,
+  "page_size": 20,
+  "runs": []
+}
+```
+
+### `GET /admin/crawl-runs/{run_id}`
+
+查询单条 CrawlRun。不存在时返回 HTTP 404：
+
+```json
+{
+  "detail": "crawl run not found: 999999"
+}
+```
+
+### `POST /admin/crawl-runs/{run_id}/retry`
+
+对 failed CrawlRun 发起手动重试。成功时返回新的 `CrawlRunOut`。
+
+非 failed 状态返回 HTTP 409：
+
+```json
+{
+  "detail": {
+    "code": "CRAWL_RUN_NOT_RETRYABLE",
+    "message": "crawl run is not retryable: 1",
+    "run_id": 1,
+    "status": "queued"
+  }
+}
+```
+
+同源活动任务冲突返回 HTTP 409：
+
+```json
+{
+  "detail": {
+    "code": "ACTIVE_CRAWL_RUN_EXISTS",
+    "message": "active crawl run exists for source: remoteok",
+    "source": "remoteok",
+    "active_run_id": 2
+  }
+}
+```
 
 ### `GET /admin/sources`
 
-Returns `{ "sources": ["remoteok", "weworkremotely"] }`.
-
----
-
-## 🔌 Adding a new source
-
-This is the best way to contribute! Each crawler is ~40 lines:
-
-1. Create `app/crawlers/<name>.py` subclassing `BaseCrawler` with `name = "<source>"`.
-2. Implement `async def fetch(self) -> AsyncIterator[NormalizedJob]`.
-3. Register an instance in `app/crawlers/__init__.py`.
-4. Add a beat schedule entry in `app/workers/celery_app.py` if you want cron.
-5. Write a crawler test modelled on `tests/test_crawlers.py` (fake the HTTP
-   client via monkeypatch on `_client()` — never hit the real network in tests).
-
----
-
-## 🧪 Test suite
-
-A **160-test** production suite runs on SQLite in under a second:
-
-| Area           | File                         | Highlights                                                           |
-|----------------|------------------------------|----------------------------------------------------------------------|
-| Normalization  | `test_normalize*.py`         | HTML / unicode / malformed / salary edges / tz / inference           |
-| Dedup          | `test_dedup*.py`             | signed/unsigned BIGINT round-trip · threshold sweeps · DB prefilter  |
-| Crawlers       | `test_crawlers*.py`          | parsing · missing fields · bad dates · single-feed failure isolation |
-| Base crawler   | `test_crawlers_edge.py`      | retry-then-succeed · give-up after 3 · semaphore concurrency cap     |
-| Ingest         | `test_ingest*.py`            | upsert · tags storage · signed-BIGINT simhash · threshold sweeps     |
-| Search         | `test_search.py`             | filter combinations · pagination boundaries · recency order          |
-| API            | `test_api.py`                | validation · envelope · 404s · admin dispatch mocking · OpenAPI      |
-| Workers        | `test_workers.py`            | `_run_crawler` happy/empty/error · retry glue · beat schedule        |
-| Schemas+config | `test_schemas_and_config.py` | Pydantic validation · env var overrides                              |
-
-```bash
-uv run task test
-# or
-uv run pytest -q
+```json
+{
+  "sources": ["remoteok", "weworkremotely"]
+}
 ```
 
-Postgres-only paths (tsvector, `ts_rank_cd`, the search-vector trigger) are
-validated by the docker-compose integration stack, not by unit tests.
+## 自动化测试
 
----
+当前验证结果：
 
-## 🗺️ Roadmap
+- CrawlRun 专项：68 passed
+- API 专项：51 passed
+- Worker 专项：39 passed
+- 全量测试：299 passed
+- PostgreSQL 真实验收通过
 
-<details>
-<summary><strong>Phase 1 — Hardening</strong> (next)</summary>
+测试覆盖重点：
 
-- 🛠️ API key / JWT auth on `/admin/*` endpoints
-- 🛠️ Rate limiting (slowapi or reverse-proxy based)
-- 🛠️ Structured logging (structlog + request IDs)
-- 🛠️ Prometheus `/metrics` endpoint
-- 🛠️ Alembic migrations alongside the idempotent bootstrap
-- 🛠️ Pre-commit hooks (ruff + mypy)
+- Pydantic Schema 与配置
+- 职位标准化、去重、入库和搜索
+- Admin API 成功、404、409 和 422
+- CrawlRun 查询、重试、防重和 stale recovery
+- Worker retry、timeout、Dispatcher 和 Beat 配置
 
-</details>
+## 项目边界和已知限制
 
-<details>
-<summary><strong>Phase 2 — More sources</strong></summary>
+- 同源活动任务防重是应用层 best-effort，存在并发窗口。
+- 第一版没有 Redis 锁、PostgreSQL advisory lock 或部分唯一索引。
+- 当前 CrawlRun 没有 `updated_at`，`retrying` 使用第一次 `started_at` 参与 stale 判断。
+- 硬超时可能无法执行 Python 清理逻辑。
+- stale recovery 后，旧 Worker 或 `acks_late` 重新投递的任务可能再次运行。
+- `mark_crawl_run_succeeded` 当前没有终态条件保护，晚到旧任务可能覆盖恢复后的 failed。
+- 当前 Schema 升级依赖 `app/schema.py::init_schema()` 和 PostgreSQL 幂等 DDL，不是 Alembic 版本化迁移体系。
+- WeWorkRemotely 尚未进行独立真实 Docker E2E。
 
-- 🛠️ Hacker News "Who's Hiring" monthly scrape
-- 🛠️ Wellfound / AngelList public listings
-- 🛠️ Lever / Greenhouse / Workable job-board APIs
-- 🛠️ Generic career-page scraper with per-company selector configs
-- 🛠️ Robots.txt + Crawl-Delay honouring per source
+## 上游项目与开源许可
 
-</details>
+JobRadar 基于 Talash 进行二次开发。
 
-<details>
-<summary><strong>Phase 3 — Better search</strong></summary>
+- 上游仓库：https://github.com/iamrahulroyy/talash
+- 上游项目 Talash 使用 MIT License。
+- 本仓库保留原始 LICENSE 和上游归属。
+- 本项目的求职亮点是对任务生命周期、失败治理和运行可观测性的后续开发。
+- 本项目不声称整个系统从零独立开发。
 
-- 🛠️ Hybrid BM25 + semantic embeddings (pgvector) for "jobs like this one"
-- 🛠️ Skill / tech-stack facets (extracted from description at ingest)
-- 🛠️ Salary normalization to annual USD + purchasing-power overlay
-- 🛠️ Company enrichment (size, sector, Glassdoor-style metadata)
-- 🛠️ Location geocoding + radius search
-- 🛠️ Saved searches → email / RSS / webhook alerts
-
-</details>
-
-<details>
-<summary><strong>Phase 4 — User-facing product</strong></summary>
-
-- 🛠️ User accounts, application tracker, kanban board
-- 🛠️ Resume-aware recommendations (embed once, rank on query)
-- 🛠️ "Hide company" / "hide keyword" personal blocklists
-- 🛠️ Browser extension: one-click save from any source page
-- 🛠️ Public Next.js front-end replacing the static MVP UI
-
-</details>
-
-<details>
-<summary><strong>Phase 5 — Scale</strong></summary>
-
-- 🛠️ Drop-in Elasticsearch / OpenSearch backend
-- 🛠️ MinHash LSH index replacing in-memory SimHash for 10M+ listings
-- 🛠️ Distributed crawl coordinator (Celery → Temporal or Arq)
-- 🛠️ Read replicas + connection pooler (pgbouncer)
-- 🛠️ S3 archival of raw crawl payloads for replay / re-normalization
-- 🛠️ Public dataset + BigQuery export
-
-</details>
-
-<details>
-<summary><strong>Phase 6 — Community</strong></summary>
-
-- 🛠️ Public demo at `demo.talash.dev`
-- 🛠️ Plugin marketplace for community crawlers
-- 🛠️ Contributor guide + issue templates + governance doc
-
-</details>
-
----
-
-## 🚫 What's deliberately out of scope (for now)
-
-- Per-company career-page scraping (each site is bespoke — Phase 2).
-- User accounts / saved searches / alerts (Phase 4).
-- Elasticsearch (Phase 5 — Postgres FTS is enough for low millions).
-- Robots.txt / rate-limit negotiation (current sources expose public feeds
-  intended for programmatic use; general scraping needs this in Phase 2).
-
----
-
-## 🤝 Contributing
-
-PRs welcome! Please read the [Contributing Guide](CONTRIBUTING.md) first.
-
-Quick version:
-
-- Run `uv run task lint` and `uv run task test` before pushing.
-- Never commit `.env` or anything derived from a live database.
-- Include a test for every crawler added — `_client()` must be monkeypatched.
-
----
-
-## 📄 License
+## License
 
 [MIT](LICENSE)
-
----
-
-<p align="center">
-  <strong>If Talash helped you, consider giving it a ⭐</strong><br>
-  <em>It helps others discover the project!</em>
-</p>
