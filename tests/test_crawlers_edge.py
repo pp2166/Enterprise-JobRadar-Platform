@@ -15,7 +15,6 @@ import pytest
 from app.crawlers.base import BaseCrawler, CrawlerRegistry
 from app.crawlers.remoteok import RemoteOKCrawler
 from app.crawlers.weworkremotely import WeWorkRemotelyCrawler
-from app.services.normalize import NormalizedJob
 
 
 class _FakeResponse:
