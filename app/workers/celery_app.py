@@ -24,12 +24,12 @@ celery_app.conf.update(
 # worker pool runs them in parallel.
 celery_app.conf.beat_schedule = {
     "crawl-remoteok": {
-        "task": "app.workers.tasks.crawl_source",
+        "task": "app.workers.tasks.dispatch_crawl_source",
         "schedule": crontab(minute="*/30"),
         "args": ("remoteok",),
     },
     "crawl-weworkremotely": {
-        "task": "app.workers.tasks.crawl_source",
+        "task": "app.workers.tasks.dispatch_crawl_source",
         "schedule": crontab(minute="5-59/30"),
         "args": ("weworkremotely",),
     },

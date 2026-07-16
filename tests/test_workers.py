@@ -19,6 +19,24 @@ from app.services.crawl_runs import create_crawl_run
 from app.services.normalize import NormalizedJob
 
 
+async def _create_worker_crawl_run(
+    session: AsyncSession,
+    *,
+    source: str,
+    status: str,
+    celery_task_id: str,
+) -> CrawlRun:
+    run = CrawlRun(
+        source=source,
+        status=status,
+        celery_task_id=celery_task_id,
+    )
+    session.add(run)
+    await session.commit()
+    await session.refresh(run)
+    return run
+
+
 class _StubCrawler(BaseCrawler):
     name = "stub"
 
@@ -334,6 +352,218 @@ class TestCrawlSourceRunTracking:
         assert run.attempt_count == 1
 
 
+@pytest.mark.asyncio
+class TestCrawlSourceDispatch:
+    async def test_dispatcher_success_creates_scheduled_run_and_dispatches_source(
+        self,
+        patched_tasks,
+        monkeypatch,
+        session: AsyncSession,
+    ):
+        calls: list[tuple[list[str], str]] = []
+        monkeypatch.setattr(patched_tasks, "uuid4", lambda: "task-dispatch-success-001")
+        monkeypatch.setattr(
+            patched_tasks.crawl_source,
+            "apply_async",
+            lambda args, task_id: calls.append((args, task_id)),
+        )
+
+        result = await patched_tasks._dispatch_crawl_source(source="remoteok")
+
+        assert result == {
+            "source": "remoteok",
+            "status": "dispatched",
+            "run_id": result["run_id"],
+            "celery_task_id": "task-dispatch-success-001",
+        }
+        assert calls == [(["remoteok"], "task-dispatch-success-001")]
+
+        run = await session.get(CrawlRun, result["run_id"])
+        assert run is not None
+        assert run.source == "remoteok"
+        assert run.status == "queued"
+        assert run.trigger_type == "scheduled"
+        assert run.celery_task_id == "task-dispatch-success-001"
+
+    async def test_dispatcher_task_id_is_not_written_to_crawl_run(
+        self,
+        patched_tasks,
+        monkeypatch,
+        session: AsyncSession,
+    ):
+        monkeypatch.setattr(patched_tasks, "uuid4", lambda: "task-dispatch-real-001")
+        monkeypatch.setattr(
+            patched_tasks.crawl_source,
+            "apply_async",
+            lambda args, task_id: None,
+        )
+
+        patched_tasks.dispatch_crawl_source.push_request(id="task-dispatcher-wrapper-001")
+        try:
+            result = await patched_tasks._dispatch_crawl_source(source="remoteok")
+        finally:
+            patched_tasks.dispatch_crawl_source.pop_request()
+
+        run = await session.get(CrawlRun, result["run_id"])
+        assert run is not None
+        assert run.celery_task_id == "task-dispatch-real-001"
+        assert run.celery_task_id != "task-dispatcher-wrapper-001"
+
+    @pytest.mark.parametrize("status", ["queued", "running", "retrying"])
+    async def test_dispatcher_skips_same_source_active_run(
+        self,
+        patched_tasks,
+        monkeypatch,
+        session: AsyncSession,
+        status: str,
+    ):
+        calls: list[tuple[list[str], str]] = []
+        active = await _create_worker_crawl_run(
+            session,
+            source="remoteok",
+            status=status,
+            celery_task_id=f"task-dispatch-active-{status}-001",
+        )
+        before = (await session.scalars(select(CrawlRun))).all()
+        monkeypatch.setattr(
+            patched_tasks.crawl_source,
+            "apply_async",
+            lambda args, task_id: calls.append((args, task_id)),
+        )
+
+        result = await patched_tasks._dispatch_crawl_source(source="remoteok")
+
+        after = (await session.scalars(select(CrawlRun))).all()
+        assert result == {
+            "source": "remoteok",
+            "status": "skipped",
+            "reason": "active crawl run exists",
+            "active_run_id": active.id,
+        }
+        assert calls == []
+        assert len(after) == len(before)
+
+    @pytest.mark.parametrize("status", ["failed", "succeeded"])
+    async def test_dispatcher_allows_inactive_history(
+        self,
+        patched_tasks,
+        monkeypatch,
+        session: AsyncSession,
+        status: str,
+    ):
+        calls: list[tuple[list[str], str]] = []
+        await _create_worker_crawl_run(
+            session,
+            source="remoteok",
+            status=status,
+            celery_task_id=f"task-dispatch-inactive-{status}-001",
+        )
+        monkeypatch.setattr(patched_tasks, "uuid4", lambda: f"task-dispatch-{status}-002")
+        monkeypatch.setattr(
+            patched_tasks.crawl_source,
+            "apply_async",
+            lambda args, task_id: calls.append((args, task_id)),
+        )
+
+        result = await patched_tasks._dispatch_crawl_source(source="remoteok")
+
+        assert result["status"] == "dispatched"
+        assert calls == [(["remoteok"], f"task-dispatch-{status}-002")]
+        runs = (await session.scalars(select(CrawlRun))).all()
+        assert len(runs) == 2
+
+    async def test_dispatcher_allows_different_source_active_run(
+        self,
+        patched_tasks,
+        monkeypatch,
+        session: AsyncSession,
+    ):
+        calls: list[tuple[list[str], str]] = []
+        await _create_worker_crawl_run(
+            session,
+            source="weworkremotely",
+            status="queued",
+            celery_task_id="task-dispatch-different-source-001",
+        )
+        monkeypatch.setattr(patched_tasks, "uuid4", lambda: "task-dispatch-different-source-002")
+        monkeypatch.setattr(
+            patched_tasks.crawl_source,
+            "apply_async",
+            lambda args, task_id: calls.append((args, task_id)),
+        )
+
+        result = await patched_tasks._dispatch_crawl_source(source="remoteok")
+
+        assert result["status"] == "dispatched"
+        assert calls == [(["remoteok"], "task-dispatch-different-source-002")]
+
+    async def test_dispatcher_marks_run_failed_when_apply_async_fails(
+        self,
+        patched_tasks,
+        monkeypatch,
+        session: AsyncSession,
+    ):
+        def fake_apply_async(args, task_id):
+            raise RuntimeError("broker unavailable")
+
+        monkeypatch.setattr(patched_tasks, "uuid4", lambda: "task-dispatch-failed-001")
+        monkeypatch.setattr(
+            patched_tasks.crawl_source,
+            "apply_async",
+            fake_apply_async,
+        )
+
+        result = await patched_tasks._dispatch_crawl_source(source="remoteok")
+
+        assert result["source"] == "remoteok"
+        assert result["status"] == "dispatch_failed"
+
+        run = await session.get(CrawlRun, result["run_id"])
+        assert run is not None
+        assert run.status == "failed"
+        assert run.error_message is not None
+        assert "dispatch failed: broker unavailable" in run.error_message
+        assert run.finished_at is not None
+
+    async def test_worker_reuses_dispatcher_created_crawl_run(
+        self,
+        patched_tasks,
+        stub_registry,
+        monkeypatch,
+        session: AsyncSession,
+    ):
+        monkeypatch.setattr(patched_tasks, "uuid4", lambda: "task-dispatch-reuse-001")
+        monkeypatch.setattr(
+            patched_tasks.crawl_source,
+            "apply_async",
+            lambda args, task_id: None,
+        )
+        dispatched = await patched_tasks._dispatch_crawl_source(source="stub")
+
+        result = await patched_tasks._run_crawler_attempt(
+            "stub",
+            task_id=dispatched["celery_task_id"],
+            retries=0,
+            max_retries=3,
+        )
+
+        assert result["source"] == "stub"
+        assert result["inserted"] == 3
+
+        runs = (
+            await session.scalars(
+                select(CrawlRun).where(
+                    CrawlRun.celery_task_id == "task-dispatch-reuse-001"
+                )
+            )
+        ).all()
+        assert len(runs) == 1
+        run = runs[0]
+        assert run.status == "succeeded"
+        assert run.trigger_type == "scheduled"
+        assert run.attempt_count == 1
+
+
 class TestCeleryTaskWrappers:
     def test_schema_failure_still_retries(self, monkeypatch):
         from app.workers import tasks
@@ -420,14 +650,20 @@ class TestCeleryTaskWrappers:
         from app.workers import tasks
 
         calls: list[str] = []
-        fake_task = MagicMock()
-        fake_task.delay = lambda name: calls.append(name)
-        monkeypatch.setattr(tasks, "crawl_source", fake_task)
+        fake_dispatcher = MagicMock()
+        fake_dispatcher.delay = lambda name: calls.append(name)
+        fake_crawl_source = MagicMock()
+        fake_crawl_source.delay = MagicMock(
+            side_effect=AssertionError("crawl_source.delay should not be called")
+        )
+        monkeypatch.setattr(tasks, "dispatch_crawl_source", fake_dispatcher)
+        monkeypatch.setattr(tasks, "crawl_source", fake_crawl_source)
 
         # crawl_all is not bound (bind=False); .run is the plain function.
         dispatched = tasks.crawl_all.run()
-        assert set(dispatched) == set(registry.names())
-        assert set(calls) == set(registry.names())
+        assert dispatched == registry.names()
+        assert calls == registry.names()
+        fake_crawl_source.delay.assert_not_called()
 
 
 class TestCeleryConfig:
@@ -437,8 +673,16 @@ class TestCeleryConfig:
         entries = celery_app.conf.beat_schedule
         assert "crawl-remoteok" in entries
         assert "crawl-weworkremotely" in entries
-        for e in entries.values():
-            assert e["task"] == "app.workers.tasks.crawl_source"
+        assert entries["crawl-remoteok"]["task"] == (
+            "app.workers.tasks.dispatch_crawl_source"
+        )
+        assert entries["crawl-remoteok"]["args"] == ("remoteok",)
+        assert entries["crawl-remoteok"]["schedule"]._orig_minute == "*/30"
+        assert entries["crawl-weworkremotely"]["task"] == (
+            "app.workers.tasks.dispatch_crawl_source"
+        )
+        assert entries["crawl-weworkremotely"]["args"] == ("weworkremotely",)
+        assert entries["crawl-weworkremotely"]["schedule"]._orig_minute == "5-59/30"
 
     def test_core_reliability_flags(self):
         from app.workers.celery_app import celery_app

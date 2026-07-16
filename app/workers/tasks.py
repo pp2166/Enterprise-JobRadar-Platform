@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from uuid import uuid4
 
 from app.crawlers import registry
 from app.database import AsyncSessionLocal
 from app.schema import init_schema
 from app.services.crawl_runs import (
+    ActiveCrawlRunExistsError,
     create_crawl_run,
+    create_crawl_run_if_inactive,
     find_crawl_run_by_task_id,
     mark_crawl_run_failed,
     mark_crawl_run_retrying,
@@ -63,6 +66,61 @@ async def _run_crawler(name: str) -> dict:
     await _ensure_schema()
     async with AsyncSessionLocal() as session:
         return await _crawl_and_ingest(name, session)
+
+
+async def _dispatch_crawl_source(
+    *,
+    source: str,
+    trigger_type: str = "scheduled",
+) -> dict:
+    await _ensure_schema()
+
+    task_id = str(uuid4())
+    async with AsyncSessionLocal() as session:
+        try:
+            run = await create_crawl_run_if_inactive(
+                session,
+                source=source,
+                celery_task_id=task_id,
+                trigger_type=trigger_type,
+            )
+        except ActiveCrawlRunExistsError as exc:
+            log.info(
+                "skipping crawl dispatch for %s; active run %s exists",
+                source,
+                exc.active_run_id,
+            )
+            return {
+                "source": source,
+                "status": "skipped",
+                "reason": "active crawl run exists",
+                "active_run_id": exc.active_run_id,
+            }
+
+        try:
+            crawl_source.apply_async(
+                args=[source],
+                task_id=task_id,
+            )
+        except Exception as exc:
+            log.exception("failed to dispatch crawl %s", source)
+            await mark_crawl_run_failed(
+                session,
+                run_id=run.id,
+                error_message=f"dispatch failed: {exc}",
+            )
+            return {
+                "source": source,
+                "status": "dispatch_failed",
+                "run_id": run.id,
+            }
+
+    return {
+        "source": source,
+        "status": "dispatched",
+        "run_id": run.id,
+        "celery_task_id": task_id,
+    }
 
 
 async def _run_crawler_attempt(
@@ -157,10 +215,23 @@ def crawl_source(self, source: str) -> dict:
     return result
 
 
+@celery_app.task(name="app.workers.tasks.dispatch_crawl_source")
+def dispatch_crawl_source(
+    source: str,
+    trigger_type: str = "scheduled",
+) -> dict:
+    return asyncio.run(
+        _dispatch_crawl_source(
+            source=source,
+            trigger_type=trigger_type,
+        )
+    )
+
+
 @celery_app.task(name="app.workers.tasks.crawl_all")
 def crawl_all() -> list[str]:
     dispatched = []
     for name in registry.names():
-        crawl_source.delay(name)
+        dispatch_crawl_source.delay(name)
         dispatched.append(name)
     return dispatched
