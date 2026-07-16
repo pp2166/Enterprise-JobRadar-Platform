@@ -122,10 +122,24 @@ def _active_conflict_detail(run: CrawlRun) -> dict[str, object]:
 
 @pytest.mark.asyncio
 class TestHealth:
-    async def test_healthz_returns_ok(self, client: AsyncClient):
+    async def test_healthz_and_static_frontend_are_served(self, client: AsyncClient):
         r = await client.get("/healthz")
         assert r.status_code == 200
         assert r.json() == {"ok": True}
+
+        home = await client.get("/")
+        assert home.status_code == 200
+        assert "采集任务" in home.text
+        assert "/static/app.css" in home.text
+        assert "/static/app.js" in home.text
+
+        css = await client.get("/static/app.css")
+        js = await client.get("/static/app.js")
+
+        assert css.status_code == 200
+        assert "text/css" in css.headers["content-type"]
+        assert js.status_code == 200
+        assert "javascript" in js.headers["content-type"]
 
 
 @pytest.mark.asyncio
