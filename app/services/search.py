@@ -9,6 +9,7 @@ rows):
 
 When no text query is supplied we fall back to pure recency order.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -93,8 +94,10 @@ async def search_jobs(session: AsyncSession, f: SearchFilters) -> tuple[int, lis
     count_stmt = select(func.count()).select_from(Job).where(and_(*clauses) if clauses else True)
     if f.q:
         # count must use the same tsquery match predicate
-        count_stmt = select(func.count()).select_from(Job).where(
-            and_(Job.search_vector.op("@@")(_build_tsquery(f.q)), *_filter_clauses(f))
+        count_stmt = (
+            select(func.count())
+            .select_from(Job)
+            .where(and_(Job.search_vector.op("@@")(_build_tsquery(f.q)), *_filter_clauses(f)))
         )
 
     total = (await session.execute(count_stmt)).scalar_one()

@@ -209,8 +209,7 @@ async def _run_crawler_attempt(
 
             if run_id is not None:
                 error_message = (
-                    "crawl soft time limit exceeded after "
-                    f"{CRAWL_SOFT_TIME_LIMIT_SECONDS} seconds"
+                    f"crawl soft time limit exceeded after {CRAWL_SOFT_TIME_LIMIT_SECONDS} seconds"
                 )
                 await mark_crawl_run_failed(
                     session,

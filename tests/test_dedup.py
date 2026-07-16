@@ -34,7 +34,9 @@ def test_near_duplicates_are_close():
 
 def test_unrelated_jobs_are_far():
     a = compute_simhash("Frontend React Developer", "Foo Inc", "React TypeScript UI accessibility")
-    b = compute_simhash("Site Reliability Engineer", "Bar LLC", "Kubernetes terraform on-call incident response")
+    b = compute_simhash(
+        "Site Reliability Engineer", "Bar LLC", "Kubernetes terraform on-call incident response"
+    )
     assert hamming(to_signed(a), to_signed(b)) > 15
 
 

@@ -4,6 +4,7 @@ Uses the public JSON feed at https://remoteok.com/api which returns the full
 set of current listings in a single response. The first element is a header
 record describing the feed; we skip it.
 """
+
 from __future__ import annotations
 
 import logging
@@ -82,7 +83,11 @@ class RemoteOKCrawler(BaseCrawler):
         if not scur and (smin or smax):
             scur = "USD"
 
-        url = item.get("url") or item.get("apply_url") or f"https://remoteok.com/remote-jobs/{item['id']}"
+        url = (
+            item.get("url")
+            or item.get("apply_url")
+            or f"https://remoteok.com/remote-jobs/{item['id']}"
+        )
 
         return NormalizedJob(
             source=self.name,

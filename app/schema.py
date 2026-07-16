@@ -3,6 +3,7 @@
 Keeps the project free of Alembic for MVP — `init_schema()` creates tables and
 installs the tsvector trigger. Run once at API and worker startup.
 """
+
 from __future__ import annotations
 
 from sqlalchemy import text

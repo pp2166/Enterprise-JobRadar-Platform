@@ -12,6 +12,7 @@ This is dependency-light (only the `simhash` lib) and fast enough for a crawl
 of a few thousand jobs; for larger scales, swap in a MinHash LSH index or
 move this into an external service.
 """
+
 from __future__ import annotations
 
 import re

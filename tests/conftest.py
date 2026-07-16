@@ -6,6 +6,7 @@ ranking — are exercised by the docker-compose integration stack, not here.
 These fixtures deliberately avoid app.schema.init_schema() because it runs
 plpgsql that SQLite can't parse.
 """
+
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
@@ -50,6 +51,7 @@ def make_job():
     so rows are not collapsed by the SimHash deduper unless the test explicitly
     passes identical values.
     """
+
     def _make(
         source: str = "remoteok",
         source_id: str = "1",
@@ -73,8 +75,9 @@ def make_job():
             url=url or f"https://example.com/{source}/{source_id}",
             title=title if title is not None else f"Job {source_id} Title",
             company=company if company is not None else f"Company {source_id}",
-            description=description if description is not None
-                else f"unique body {source_id} — role {source_id}",
+            description=description
+            if description is not None
+            else f"unique body {source_id} — role {source_id}",
             location=location,
             remote=remote,
             experience_level=experience_level,
@@ -84,6 +87,7 @@ def make_job():
             tags=tags or [],
             posted_at=posted_at or datetime.now(timezone.utc),
         )
+
     return _make
 
 

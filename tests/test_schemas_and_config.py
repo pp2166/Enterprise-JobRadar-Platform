@@ -1,4 +1,5 @@
 """Pydantic response-model + Settings coverage."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -46,11 +47,19 @@ class TestJobOut:
         assert jo.salary_currency == "USD"
 
     def test_optional_fields_accept_none(self):
-        jo = JobOut(**self._valid_payload(
-            location=None, remote=None, employment_type=None,
-            experience_level=None, salary_min=None, salary_max=None,
-            salary_currency=None, tags=None, posted_at=None,
-        ))
+        jo = JobOut(
+            **self._valid_payload(
+                location=None,
+                remote=None,
+                employment_type=None,
+                experience_level=None,
+                salary_min=None,
+                salary_max=None,
+                salary_currency=None,
+                tags=None,
+                posted_at=None,
+            )
+        )
         assert jo.posted_at is None
         assert jo.salary_min is None
 
@@ -79,11 +88,21 @@ class TestSearchResult:
 
     def test_nested_jobs(self):
         job_dict = {
-            "id": 1, "source": "remoteok", "url": "u", "title": "t",
-            "company": "c", "location": None, "remote": None,
-            "employment_type": None, "experience_level": None,
-            "salary_min": None, "salary_max": None, "salary_currency": None,
-            "description": "", "tags": None, "posted_at": None,
+            "id": 1,
+            "source": "remoteok",
+            "url": "u",
+            "title": "t",
+            "company": "c",
+            "location": None,
+            "remote": None,
+            "employment_type": None,
+            "experience_level": None,
+            "salary_min": None,
+            "salary_max": None,
+            "salary_currency": None,
+            "description": "",
+            "tags": None,
+            "posted_at": None,
             "fetched_at": datetime.now(timezone.utc),
         }
         sr = SearchResult(total=1, page=1, page_size=20, results=[JobOut(**job_dict)])
@@ -146,10 +165,12 @@ class TestCrawlRequestResponse:
         assert "id" not in dumped
 
     def test_run_dump_contains_retry_metadata(self):
-        run = CrawlRunOut(**self._valid_run_payload(
-            retry_of_run_id=5,
-            trigger_type="manual",
-        ))
+        run = CrawlRunOut(
+            **self._valid_run_payload(
+                retry_of_run_id=5,
+                trigger_type="manual",
+            )
+        )
         dumped = run.model_dump()
         assert dumped["retry_of_run_id"] == 5
         assert dumped["trigger_type"] == "manual"

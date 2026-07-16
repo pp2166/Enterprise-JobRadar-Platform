@@ -50,8 +50,7 @@ class BaseCrawler(abc.ABC):
             raise RuntimeError("unreachable")
 
     @abc.abstractmethod
-    async def fetch(self) -> AsyncIterator[NormalizedJob]:
-        ...
+    async def fetch(self) -> AsyncIterator[NormalizedJob]: ...
 
 
 class CrawlerRegistry:

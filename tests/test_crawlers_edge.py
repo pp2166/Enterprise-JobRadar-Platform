@@ -4,6 +4,7 @@ All network is faked via a FakeClient; we cover: malformed payloads, missing
 fields, bad dates, HTTP retries/backoff, final-failure behaviour, empty RSS,
 and feed loop error isolation.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -20,7 +21,9 @@ from app.crawlers.weworkremotely import WeWorkRemotelyCrawler
 class _FakeResponse:
     def __init__(self, payload=None, text=None, status_code=200, raise_exc=None):
         self._payload = payload
-        self.text = text if text is not None else (json.dumps(payload) if payload is not None else "")
+        self.text = (
+            text if text is not None else (json.dumps(payload) if payload is not None else "")
+        )
         self.status_code = status_code
         self._raise_exc = raise_exc
 
@@ -61,7 +64,8 @@ class TestRemoteOKEdges:
     async def test_non_list_payload_yields_nothing(self, monkeypatch):
         crawler = RemoteOKCrawler()
         monkeypatch.setattr(
-            crawler, "_client",
+            crawler,
+            "_client",
             lambda: _FakeClient(lambda url, n: _FakeResponse(payload={"not": "a list"})),
         )
         jobs = [j async for j in crawler.fetch()]
@@ -71,7 +75,8 @@ class TestRemoteOKEdges:
         crawler = RemoteOKCrawler()
         resp = _FakeResponse(payload=ValueError(), text="{not json")
         monkeypatch.setattr(
-            crawler, "_client",
+            crawler,
+            "_client",
             lambda: _FakeClient(lambda url, n: resp),
         )
         jobs = [j async for j in crawler.fetch()]
@@ -79,14 +84,15 @@ class TestRemoteOKEdges:
 
     async def test_missing_required_fields_skipped(self, monkeypatch):
         payload = [
-            {"id": "1", "position": "", "company": "Acme"},            # empty title
-            {"id": "2", "position": "Dev", "company": ""},             # empty company
-            {"id": "3", "position": "Dev"},                            # missing company key
-            {"position": "Dev", "company": "Acme"},                    # missing id (also missing from filter)
+            {"id": "1", "position": "", "company": "Acme"},  # empty title
+            {"id": "2", "position": "Dev", "company": ""},  # empty company
+            {"id": "3", "position": "Dev"},  # missing company key
+            {"position": "Dev", "company": "Acme"},  # missing id (also missing from filter)
         ]
         crawler = RemoteOKCrawler()
         monkeypatch.setattr(
-            crawler, "_client",
+            crawler,
+            "_client",
             lambda: _FakeClient(lambda url, n: _FakeResponse(payload=payload)),
         )
         jobs = [j async for j in crawler.fetch()]
@@ -104,7 +110,8 @@ class TestRemoteOKEdges:
         ]
         crawler = RemoteOKCrawler()
         monkeypatch.setattr(
-            crawler, "_client",
+            crawler,
+            "_client",
             lambda: _FakeClient(lambda url, n: _FakeResponse(payload=payload)),
         )
         jobs = [j async for j in crawler.fetch()]
@@ -123,7 +130,8 @@ class TestRemoteOKEdges:
         ]
         crawler = RemoteOKCrawler()
         monkeypatch.setattr(
-            crawler, "_client",
+            crawler,
+            "_client",
             lambda: _FakeClient(lambda url, n: _FakeResponse(payload=payload)),
         )
         jobs = [j async for j in crawler.fetch()]
@@ -142,7 +150,8 @@ class TestRemoteOKEdges:
         ]
         crawler = RemoteOKCrawler()
         monkeypatch.setattr(
-            crawler, "_client",
+            crawler,
+            "_client",
             lambda: _FakeClient(lambda url, n: _FakeResponse(payload=payload)),
         )
         jobs = [j async for j in crawler.fetch()]
@@ -161,7 +170,8 @@ class TestRemoteOKEdges:
         ]
         crawler = RemoteOKCrawler()
         monkeypatch.setattr(
-            crawler, "_client",
+            crawler,
+            "_client",
             lambda: _FakeClient(lambda url, n: _FakeResponse(payload=payload)),
         )
         jobs = [j async for j in crawler.fetch()]
@@ -169,12 +179,11 @@ class TestRemoteOKEdges:
         assert jobs[0].salary_max is None
 
     async def test_default_url_when_missing(self, monkeypatch):
-        payload = [
-            {"id": "abc", "position": "Dev", "company": "Acme", "description": ""}
-        ]
+        payload = [{"id": "abc", "position": "Dev", "company": "Acme", "description": ""}]
         crawler = RemoteOKCrawler()
         monkeypatch.setattr(
-            crawler, "_client",
+            crawler,
+            "_client",
             lambda: _FakeClient(lambda url, n: _FakeResponse(payload=payload)),
         )
         jobs = [j async for j in crawler.fetch()]
@@ -186,7 +195,8 @@ class TestWWREdges:
         rss = '<?xml version="1.0"?><rss version="2.0"><channel><title>x</title></channel></rss>'
         crawler = WeWorkRemotelyCrawler()
         monkeypatch.setattr(
-            crawler, "_client",
+            crawler,
+            "_client",
             lambda: _FakeClient(lambda url, n: _FakeResponse(payload=None, text=rss)),
         )
         jobs = [j async for j in crawler.fetch()]
@@ -203,7 +213,8 @@ class TestWWREdges:
         </channel></rss>"""
         crawler = WeWorkRemotelyCrawler()
         monkeypatch.setattr(
-            crawler, "_client",
+            crawler,
+            "_client",
             lambda: _FakeClient(lambda url, n: _FakeResponse(payload=None, text=rss)),
         )
         jobs = [j async for j in crawler.fetch()]
@@ -220,7 +231,8 @@ class TestWWREdges:
         </channel></rss>"""
         crawler = WeWorkRemotelyCrawler()
         monkeypatch.setattr(
-            crawler, "_client",
+            crawler,
+            "_client",
             lambda: _FakeClient(lambda url, n: _FakeResponse(payload=None, text=rss)),
         )
         jobs = [j async for j in crawler.fetch()]

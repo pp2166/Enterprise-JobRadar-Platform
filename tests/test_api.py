@@ -5,6 +5,7 @@ SQLite engine provided by conftest. ASGITransport does not auto-run the
 lifespan hook, so the Postgres-only init_schema() is skipped — tables are
 created directly by the sqlite_engine fixture.
 """
+
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
@@ -43,15 +44,28 @@ async def seeded(sqlite_engine, make_job):
     """Populate the SQLite engine with a small, deterministic job set."""
     Session = async_sessionmaker(sqlite_engine, expire_on_commit=False, class_=AsyncSession)
     async with Session() as s:
-        await ingest_jobs(s, [
-            make_job(source="remoteok",       source_id="1",
-                     title="Senior Python Engineer", company="Acme"),
-            make_job(source="remoteok",       source_id="2",
-                     title="Junior Rust Engineer",   company="Beta",
-                     experience_level="junior", remote=False),
-            make_job(source="weworkremotely", source_id="3",
-                     title="Staff Frontend Engineer", company="Gamma"),
-        ])
+        await ingest_jobs(
+            s,
+            [
+                make_job(
+                    source="remoteok", source_id="1", title="Senior Python Engineer", company="Acme"
+                ),
+                make_job(
+                    source="remoteok",
+                    source_id="2",
+                    title="Junior Rust Engineer",
+                    company="Beta",
+                    experience_level="junior",
+                    remote=False,
+                ),
+                make_job(
+                    source="weworkremotely",
+                    source_id="3",
+                    title="Staff Frontend Engineer",
+                    company="Gamma",
+                ),
+            ],
+        )
 
 
 async def _create_crawl_run(
@@ -166,7 +180,7 @@ class TestSearchEndpoint:
         assert r.status_code == 422
 
     async def test_remote_bool_parsed(self, client: AsyncClient, seeded):
-        r_true  = await client.get("/search", params={"remote": "true"})
+        r_true = await client.get("/search", params={"remote": "true"})
         r_false = await client.get("/search", params={"remote": "false"})
         assert r_true.status_code == 200 and r_false.status_code == 200
         # filter behaviour is unit-tested in test_search; just assert it's applied.
@@ -510,9 +524,7 @@ class TestAdminEndpoints:
         r = await client.post(f"/admin/crawl-runs/{parent.id}/retry")
 
         children = (
-            await session.scalars(
-                select(CrawlRun).where(CrawlRun.retry_of_run_id == parent.id)
-            )
+            await session.scalars(select(CrawlRun).where(CrawlRun.retry_of_run_id == parent.id))
         ).all()
         await session.refresh(parent)
         await session.refresh(active)
@@ -609,9 +621,7 @@ class TestAdminEndpoints:
         assert r.status_code == 503
 
         children = (
-            await session.scalars(
-                select(CrawlRun).where(CrawlRun.retry_of_run_id == parent.id)
-            )
+            await session.scalars(select(CrawlRun).where(CrawlRun.retry_of_run_id == parent.id))
         ).all()
         assert len(children) == 1
         child = children[0]

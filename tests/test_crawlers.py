@@ -3,6 +3,7 @@
 We drive the crawler from a fake httpx.AsyncClient so we can assert the
 normalization behaviour on a stable fixture.
 """
+
 from __future__ import annotations
 
 import json
