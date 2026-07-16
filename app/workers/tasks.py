@@ -5,6 +5,8 @@ import logging
 from dataclasses import dataclass
 from uuid import uuid4
 
+from billiard.exceptions import SoftTimeLimitExceeded
+
 from app.crawlers import registry
 from app.database import AsyncSessionLocal
 from app.schema import init_schema
@@ -23,6 +25,9 @@ from app.services.normalize import NormalizedJob
 from app.workers.celery_app import celery_app
 
 log = logging.getLogger(__name__)
+
+CRAWL_SOFT_TIME_LIMIT_SECONDS = 120
+CRAWL_TIME_LIMIT_SECONDS = 150
 
 _schema_ready = False
 
@@ -157,6 +162,21 @@ async def _run_crawler_attempt(
 
         try:
             result = await _crawl_and_ingest(name, session)
+        except SoftTimeLimitExceeded:
+            log.exception("crawl %s exceeded soft time limit", name)
+            await session.rollback()
+
+            if run_id is not None:
+                error_message = (
+                    "crawl soft time limit exceeded after "
+                    f"{CRAWL_SOFT_TIME_LIMIT_SECONDS} seconds"
+                )
+                await mark_crawl_run_failed(
+                    session,
+                    run_id=run_id,
+                    error_message=error_message,
+                )
+            raise
         except Exception as exc:
             log.exception("crawl %s failed", name)
             await session.rollback()
@@ -191,7 +211,14 @@ async def _run_crawler_attempt(
         return result
 
 
-@celery_app.task(name="app.workers.tasks.crawl_source", bind=True, max_retries=3, default_retry_delay=60)
+@celery_app.task(
+    name="app.workers.tasks.crawl_source",
+    bind=True,
+    max_retries=3,
+    default_retry_delay=60,
+    soft_time_limit=CRAWL_SOFT_TIME_LIMIT_SECONDS,
+    time_limit=CRAWL_TIME_LIMIT_SECONDS,
+)
 def crawl_source(self, source: str) -> dict:
     try:
         result = asyncio.run(
@@ -202,6 +229,9 @@ def crawl_source(self, source: str) -> dict:
                 max_retries=self.max_retries,
             )
         )
+    except SoftTimeLimitExceeded:
+        log.exception("crawl %s soft time limit exceeded", source)
+        raise
     except Exception as exc:
         log.exception("crawl %s attempt failed", source)
 

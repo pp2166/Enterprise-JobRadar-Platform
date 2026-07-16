@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from billiard.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -351,6 +352,54 @@ class TestCrawlSourceRunTracking:
         assert run.status == "succeeded"
         assert run.attempt_count == 1
 
+    @pytest.mark.parametrize("retries", [0, 3])
+    async def test_soft_time_limit_marks_crawl_run_failed_without_retry(
+        self,
+        patched_tasks,
+        monkeypatch,
+        session: AsyncSession,
+        retries: int,
+    ):
+        async def fake_crawl_and_ingest(name, session):
+            raise SoftTimeLimitExceeded()
+
+        run = await create_crawl_run(
+            session,
+            source="timeout",
+            celery_task_id=f"task-worker-soft-timeout-{retries}",
+        )
+        monkeypatch.setattr(
+            patched_tasks,
+            "_crawl_and_ingest",
+            fake_crawl_and_ingest,
+        )
+
+        with pytest.raises(SoftTimeLimitExceeded):
+            await patched_tasks._run_crawler_attempt(
+                "timeout",
+                task_id=f"task-worker-soft-timeout-{retries}",
+                retries=retries,
+                max_retries=3,
+            )
+
+        await session.refresh(run)
+        assert run.status == "failed"
+        assert run.error_message == (
+            "crawl soft time limit exceeded after 120 seconds"
+        )
+        assert run.finished_at is not None
+        assert run.attempt_count == 1
+
+        runs = (
+            await session.scalars(
+                select(CrawlRun).where(
+                    CrawlRun.celery_task_id == f"task-worker-soft-timeout-{retries}"
+                )
+            )
+        ).all()
+        assert len(runs) == 1
+        assert runs[0].id == run.id
+
 
 @pytest.mark.asyncio
 class TestCrawlSourceDispatch:
@@ -646,6 +695,26 @@ class TestCeleryTaskWrappers:
 
         mock_retry.assert_not_called()
 
+    def test_crawl_source_reraises_soft_time_limit_without_retry(self, monkeypatch):
+        from app.workers import tasks
+
+        def fake_run(coro):
+            coro.close()
+            raise SoftTimeLimitExceeded()
+
+        monkeypatch.setattr(tasks.asyncio, "run", fake_run)
+        mock_retry = MagicMock()
+        monkeypatch.setattr(tasks.crawl_source, "retry", mock_retry)
+
+        tasks.crawl_source.push_request(id="task-soft-timeout-wrapper-001", retries=0)
+        try:
+            with pytest.raises(SoftTimeLimitExceeded):
+                tasks.crawl_source.run("remoteok")
+        finally:
+            tasks.crawl_source.pop_request()
+
+        mock_retry.assert_not_called()
+
     def test_crawl_all_dispatches_every_registered_source(self, monkeypatch):
         from app.workers import tasks
 
@@ -667,6 +736,28 @@ class TestCeleryTaskWrappers:
 
 
 class TestCeleryConfig:
+    def test_crawl_source_time_limit_configuration(self):
+        from app.workers.tasks import (
+            CRAWL_SOFT_TIME_LIMIT_SECONDS,
+            CRAWL_TIME_LIMIT_SECONDS,
+            crawl_source,
+        )
+
+        assert crawl_source.soft_time_limit == CRAWL_SOFT_TIME_LIMIT_SECONDS
+        assert crawl_source.time_limit == CRAWL_TIME_LIMIT_SECONDS
+        assert crawl_source.soft_time_limit == 120
+        assert crawl_source.time_limit == 150
+        assert crawl_source.max_retries == 3
+        assert crawl_source.default_retry_delay == 60
+
+    def test_only_crawl_source_has_time_limits(self):
+        from app.workers.tasks import crawl_all, dispatch_crawl_source
+
+        assert dispatch_crawl_source.soft_time_limit is None
+        assert dispatch_crawl_source.time_limit is None
+        assert crawl_all.soft_time_limit is None
+        assert crawl_all.time_limit is None
+
     def test_beat_schedule_includes_both_sources(self):
         from app.workers.celery_app import celery_app
 
