@@ -35,6 +35,13 @@ class CrawlRunNotRetryableError(ValueError):
         super().__init__(f"crawl run is not retryable: {run_id}")
 
 
+class ActiveCrawlRunExistsError(ValueError):
+    def __init__(self, *, source: str, active_run_id: int) -> None:
+        self.source = source
+        self.active_run_id = active_run_id
+        super().__init__(f"active crawl run exists for source: {source}")
+
+
 async def _get_crawl_run(
     session: AsyncSession,
     run_id: int,
@@ -66,7 +73,7 @@ async def create_retry_crawl_run(
     if parent.status != "failed":
         raise CrawlRunNotRetryableError(run_id=parent.id, status=parent.status)
 
-    return await create_crawl_run(
+    return await create_crawl_run_if_inactive(
         session,
         source=parent.source,
         celery_task_id=celery_task_id,
@@ -96,6 +103,31 @@ async def create_crawl_run(
     await session.refresh(run)
 
     return run
+
+
+async def create_crawl_run_if_inactive(
+    session: AsyncSession,
+    *,
+    source: str,
+    celery_task_id: str,
+    trigger_type: str = "api",
+    retry_of_run_id: int | None = None,
+) -> CrawlRun:
+    active_run = await find_active_crawl_run(session, source=source)
+
+    if active_run is not None:
+        raise ActiveCrawlRunExistsError(
+            source=source,
+            active_run_id=active_run.id,
+        )
+
+    return await create_crawl_run(
+        session,
+        source=source,
+        celery_task_id=celery_task_id,
+        trigger_type=trigger_type,
+        retry_of_run_id=retry_of_run_id,
+    )
 
 
 async def find_crawl_run_by_task_id(

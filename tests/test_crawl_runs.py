@@ -10,9 +10,11 @@ from sqlalchemy import select
 from app.models import CrawlRun
 from app.services.crawl_runs import (
     ACTIVE_CRAWL_RUN_STATUSES,
+    ActiveCrawlRunExistsError,
     CrawlRunNotFoundError,
     CrawlRunNotRetryableError,
     create_crawl_run,
+    create_crawl_run_if_inactive,
     create_retry_crawl_run,
     find_active_crawl_run,
     find_crawl_run_by_task_id,
@@ -95,6 +97,25 @@ async def _create_run_with_status(
 
     await session.refresh(run)
     return run
+
+
+def _crawl_run_snapshot(run: CrawlRun) -> dict[str, object]:
+    return {
+        "source": run.source,
+        "status": run.status,
+        "celery_task_id": run.celery_task_id,
+        "retry_of_run_id": run.retry_of_run_id,
+        "trigger_type": run.trigger_type,
+        "attempt_count": run.attempt_count,
+        "received": run.received,
+        "inserted": run.inserted,
+        "updated": run.updated,
+        "duplicates": run.duplicates,
+        "error_message": run.error_message,
+        "created_at": run.created_at,
+        "started_at": run.started_at,
+        "finished_at": run.finished_at,
+    }
 
 
 @pytest.mark.asyncio
@@ -446,6 +467,160 @@ async def test_find_active_crawl_run_does_not_modify_records(session):
 
 
 @pytest.mark.asyncio
+async def test_create_crawl_run_if_inactive_creates_queued_record(session):
+    run = await create_crawl_run_if_inactive(
+        session,
+        source="remoteok",
+        celery_task_id="task-inactive-create-001",
+    )
+
+    assert run.id is not None
+    assert run.source == "remoteok"
+    assert run.status == "queued"
+    assert run.celery_task_id == "task-inactive-create-001"
+    assert run.trigger_type == "api"
+    assert run.retry_of_run_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ACTIVE_CRAWL_RUN_STATUSES)
+async def test_create_crawl_run_if_inactive_rejects_active_statuses(session, status):
+    active = await _create_run_with_status(
+        session,
+        status=status,
+        celery_task_id=f"task-inactive-block-{status}-001",
+    )
+
+    with pytest.raises(
+        ActiveCrawlRunExistsError,
+        match="active crawl run exists for source: remoteok",
+    ) as exc_info:
+        await create_crawl_run_if_inactive(
+            session,
+            source="remoteok",
+            celery_task_id=f"task-inactive-block-child-{status}-001",
+        )
+
+    assert exc_info.value.source == "remoteok"
+    assert exc_info.value.active_run_id == active.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["failed", "succeeded"])
+async def test_create_crawl_run_if_inactive_allows_inactive_statuses(session, status):
+    await _create_run_with_status(
+        session,
+        status=status,
+        celery_task_id=f"task-inactive-allow-{status}-001",
+    )
+
+    run = await create_crawl_run_if_inactive(
+        session,
+        source="remoteok",
+        celery_task_id=f"task-inactive-allow-child-{status}-001",
+    )
+
+    assert run.status == "queued"
+    assert run.source == "remoteok"
+
+
+@pytest.mark.asyncio
+async def test_create_crawl_run_if_inactive_ignores_different_source_activity(session):
+    await create_crawl_run(
+        session,
+        source="weworkremotely",
+        celery_task_id="task-inactive-different-source-001",
+    )
+
+    run = await create_crawl_run_if_inactive(
+        session,
+        source="remoteok",
+        celery_task_id="task-inactive-different-source-002",
+    )
+
+    assert run.source == "remoteok"
+    assert run.status == "queued"
+
+
+@pytest.mark.asyncio
+async def test_create_crawl_run_if_inactive_uses_latest_active_run_in_error(session):
+    await _create_list_run(
+        session,
+        source="remoteok",
+        status="queued",
+        celery_task_id="task-inactive-latest-001",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    await _create_list_run(
+        session,
+        source="remoteok",
+        status="running",
+        celery_task_id="task-inactive-latest-002",
+        created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+    newest = await _create_list_run(
+        session,
+        source="remoteok",
+        status="retrying",
+        celery_task_id="task-inactive-latest-003",
+        created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(ActiveCrawlRunExistsError) as exc_info:
+        await create_crawl_run_if_inactive(
+            session,
+            source="remoteok",
+            celery_task_id="task-inactive-latest-child-001",
+        )
+
+    assert exc_info.value.active_run_id == newest.id
+
+
+@pytest.mark.asyncio
+async def test_create_crawl_run_if_inactive_conflict_does_not_modify_database(session):
+    active = await create_crawl_run(
+        session,
+        source="remoteok",
+        celery_task_id="task-inactive-readonly-001",
+    )
+    original = _crawl_run_snapshot(active)
+    before = (await session.scalars(select(CrawlRun))).all()
+
+    with pytest.raises(ActiveCrawlRunExistsError):
+        await create_crawl_run_if_inactive(
+            session,
+            source="remoteok",
+            celery_task_id="task-inactive-readonly-child-001",
+        )
+
+    after = (await session.scalars(select(CrawlRun))).all()
+    await session.refresh(active)
+
+    assert len(after) == len(before)
+    assert _crawl_run_snapshot(active) == original
+
+
+@pytest.mark.asyncio
+async def test_create_crawl_run_if_inactive_passes_trigger_type_and_retry_parent(session):
+    parent = await _create_run_with_status(
+        session,
+        status="failed",
+        celery_task_id="task-inactive-params-parent-001",
+    )
+
+    child = await create_crawl_run_if_inactive(
+        session,
+        source="remoteok",
+        celery_task_id="task-inactive-params-child-001",
+        trigger_type="manual",
+        retry_of_run_id=parent.id,
+    )
+
+    assert child.trigger_type == "manual"
+    assert child.retry_of_run_id == parent.id
+
+
+@pytest.mark.asyncio
 async def test_get_crawl_run_returns_record_by_id(session):
     run = await create_crawl_run(
         session,
@@ -521,6 +696,90 @@ async def test_create_retry_crawl_run_creates_manual_child_from_failed_parent(se
 
     records = (await session.scalars(select(CrawlRun))).all()
     assert {run.id for run in records} == {parent.id, retry.id}
+
+
+@pytest.mark.asyncio
+async def test_create_retry_crawl_run_rejects_same_source_active_run(session):
+    parent = await _create_run_with_status(
+        session,
+        status="failed",
+        celery_task_id="task-retry-active-parent-001",
+    )
+    active = await create_crawl_run(
+        session,
+        source="remoteok",
+        celery_task_id="task-retry-active-current-001",
+    )
+    parent_original = _crawl_run_snapshot(parent)
+    active_original = _crawl_run_snapshot(active)
+    before = (await session.scalars(select(CrawlRun))).all()
+
+    with pytest.raises(
+        ActiveCrawlRunExistsError,
+        match="active crawl run exists for source: remoteok",
+    ) as exc_info:
+        await create_retry_crawl_run(
+            session,
+            run_id=parent.id,
+            celery_task_id="task-retry-active-child-001",
+        )
+
+    after = (await session.scalars(select(CrawlRun))).all()
+    await session.refresh(parent)
+    await session.refresh(active)
+
+    assert exc_info.value.source == "remoteok"
+    assert exc_info.value.active_run_id == active.id
+    assert len(after) == len(before)
+    assert _crawl_run_snapshot(parent) == parent_original
+    assert _crawl_run_snapshot(active) == active_original
+
+
+@pytest.mark.asyncio
+async def test_create_retry_crawl_run_allows_different_source_active_run(session):
+    parent = await _create_run_with_status(
+        session,
+        status="failed",
+        celery_task_id="task-retry-different-active-parent-001",
+    )
+    await create_crawl_run(
+        session,
+        source="weworkremotely",
+        celery_task_id="task-retry-different-active-current-001",
+    )
+
+    retry = await create_retry_crawl_run(
+        session,
+        run_id=parent.id,
+        celery_task_id="task-retry-different-active-child-001",
+    )
+
+    assert retry.source == parent.source
+    assert retry.status == "queued"
+    assert retry.trigger_type == "manual"
+    assert retry.retry_of_run_id == parent.id
+
+
+@pytest.mark.asyncio
+async def test_create_retry_crawl_run_checks_retryable_status_before_activity(session):
+    parent = await create_crawl_run(
+        session,
+        source="remoteok",
+        celery_task_id="task-retry-priority-parent-001",
+    )
+
+    with pytest.raises(
+        CrawlRunNotRetryableError,
+        match=f"crawl run is not retryable: {parent.id}",
+    ) as exc_info:
+        await create_retry_crawl_run(
+            session,
+            run_id=parent.id,
+            celery_task_id="task-retry-priority-child-001",
+        )
+
+    assert exc_info.value.run_id == parent.id
+    assert exc_info.value.status == "queued"
 
 
 @pytest.mark.asyncio
