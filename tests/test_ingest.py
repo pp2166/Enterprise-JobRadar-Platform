@@ -1,4 +1,5 @@
 """Ingest-layer coverage: stats, upsert fields, SimHash threshold behaviour."""
+
 from __future__ import annotations
 
 import pytest
@@ -25,17 +26,29 @@ class TestIngestStats:
 
     async def test_mixed_insert_and_dup_counts(self, session, make_job):
         base_desc = "Build async Python backends with fastapi postgres redis at scale."
-        j1 = make_job(source="remoteok", source_id="1",
-                      title="Senior Python Engineer", company="Acme",
-                      description=base_desc)
+        j1 = make_job(
+            source="remoteok",
+            source_id="1",
+            title="Senior Python Engineer",
+            company="Acme",
+            description=base_desc,
+        )
         # Exact near-duplicate, different source_id → dedup counted.
-        j2 = make_job(source="remoteok", source_id="2",
-                      title="Senior Python Engineer", company="Acme",
-                      description=base_desc + " minor rewording")
+        j2 = make_job(
+            source="remoteok",
+            source_id="2",
+            title="Senior Python Engineer",
+            company="Acme",
+            description=base_desc + " minor rewording",
+        )
         # Entirely unrelated → kept.
-        j3 = make_job(source="remoteok", source_id="3",
-                      title="Frontend React Developer", company="Foo",
-                      description="react typescript ui a11y")
+        j3 = make_job(
+            source="remoteok",
+            source_id="3",
+            title="Frontend React Developer",
+            company="Foo",
+            description="react typescript ui a11y",
+        )
         stats = await ingest_jobs(session, [j1, j2, j3])
         assert stats.received == 3
         assert stats.inserted >= 2
@@ -70,8 +83,9 @@ class TestUpsertSemantics:
         assert row.tags is None
 
     async def test_simhash_stored_as_signed_bigint(self, session, make_job):
-        j = make_job(source_id="Z", title="Senior Engineer",
-                     company="Acme", description="build stuff")
+        j = make_job(
+            source_id="Z", title="Senior Engineer", company="Acme", description="build stuff"
+        )
         await ingest_jobs(session, [j])
         row = (await session.execute(select(Job).where(Job.source_id == "Z"))).scalar_one()
         assert row.simhash is not None
@@ -87,10 +101,18 @@ class TestSimhashThreshold:
         monkeypatch.setattr(ing.settings, "simhash_threshold", 0, raising=False)
 
         # Two near-identical descriptions, different source_ids + wording tweaks.
-        j1 = make_job(source_id="1", title="Python Eng", company="Acme",
-                      description="build async backends with fastapi and postgres")
-        j2 = make_job(source_id="2", title="Python Eng", company="Acme",
-                      description="build async backends with fastapi and postgres!!!")
+        j1 = make_job(
+            source_id="1",
+            title="Python Eng",
+            company="Acme",
+            description="build async backends with fastapi and postgres",
+        )
+        j2 = make_job(
+            source_id="2",
+            title="Python Eng",
+            company="Acme",
+            description="build async backends with fastapi and postgres!!!",
+        )
         await ingest_jobs(session, [j1])
         stats = await ingest_jobs(session, [j2])
         # At threshold=0, only identical hashes collapse — near-dupes go through.
@@ -101,10 +123,18 @@ class TestSimhashThreshold:
 
         monkeypatch.setattr(ing.settings, "simhash_threshold", 64, raising=False)
 
-        j1 = make_job(source_id="1", title="Python Eng", company="Acme",
-                      description="totally different text here")
-        j2 = make_job(source_id="2", title="Python Eng", company="Acme",
-                      description="another unrelated body of text")
+        j1 = make_job(
+            source_id="1",
+            title="Python Eng",
+            company="Acme",
+            description="totally different text here",
+        )
+        j2 = make_job(
+            source_id="2",
+            title="Python Eng",
+            company="Acme",
+            description="another unrelated body of text",
+        )
         await ingest_jobs(session, [j1])
         stats = await ingest_jobs(session, [j2])
         # With max Hamming distance as threshold, any (acme, python-eng) pair dedupes.

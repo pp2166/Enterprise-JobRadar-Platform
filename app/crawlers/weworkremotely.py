@@ -3,6 +3,7 @@
 WWR exposes an RSS feed per category; we aggregate a few core ones. Descriptions
 are HTML and get passed through the selectolax stripper in normalize.py.
 """
+
 from __future__ import annotations
 
 import logging

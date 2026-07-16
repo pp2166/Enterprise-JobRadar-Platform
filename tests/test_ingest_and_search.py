@@ -9,6 +9,7 @@ don't work on SQLite, so this test exercises the non-Postgres paths:
 For the full tsvector-based ranking path, run the integration stack with
 docker compose and query /search.
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -34,7 +35,9 @@ async def session():
     await engine.dispose()
 
 
-def _job(source: str, sid: str, title: str, company: str, desc: str, posted_at=None) -> NormalizedJob:
+def _job(
+    source: str, sid: str, title: str, company: str, desc: str, posted_at=None
+) -> NormalizedJob:
     return NormalizedJob(
         source=source,
         source_id=sid,
@@ -63,10 +66,20 @@ async def test_ingest_inserts_then_upserts(session: AsyncSession):
 
 
 async def test_simhash_dedups_across_sources(session: AsyncSession):
-    j1 = _job("remoteok", "A1", "Senior Python Engineer", "Acme",
-              "Build async backends with fastapi, postgres, and redis at scale.")
-    j2 = _job("weworkremotely", "B1", "Senior Python Engineer", "Acme",
-              "Build async backends with fastapi, postgres, and redis at scale!")
+    j1 = _job(
+        "remoteok",
+        "A1",
+        "Senior Python Engineer",
+        "Acme",
+        "Build async backends with fastapi, postgres, and redis at scale.",
+    )
+    j2 = _job(
+        "weworkremotely",
+        "B1",
+        "Senior Python Engineer",
+        "Acme",
+        "Build async backends with fastapi, postgres, and redis at scale!",
+    )
     stats = await ingest_jobs(session, [j1])
     assert stats.inserted == 1
     stats = await ingest_jobs(session, [j2])
@@ -76,11 +89,35 @@ async def test_simhash_dedups_across_sources(session: AsyncSession):
 
 async def test_search_filters_and_recency(session: AsyncSession):
     now = datetime.now(timezone.utc)
-    await ingest_jobs(session, [
-        _job("remoteok", "1", "Rust Engineer", "Foo", "systems rust", posted_at=now - timedelta(days=30)),
-        _job("remoteok", "2", "Python Engineer", "Bar", "backend python", posted_at=now - timedelta(days=1)),
-        _job("remoteok", "3", "Frontend Engineer", "Baz", "react ui", posted_at=now - timedelta(hours=1)),
-    ])
+    await ingest_jobs(
+        session,
+        [
+            _job(
+                "remoteok",
+                "1",
+                "Rust Engineer",
+                "Foo",
+                "systems rust",
+                posted_at=now - timedelta(days=30),
+            ),
+            _job(
+                "remoteok",
+                "2",
+                "Python Engineer",
+                "Bar",
+                "backend python",
+                posted_at=now - timedelta(days=1),
+            ),
+            _job(
+                "remoteok",
+                "3",
+                "Frontend Engineer",
+                "Baz",
+                "react ui",
+                posted_at=now - timedelta(hours=1),
+            ),
+        ],
+    )
 
     total, jobs = await search_jobs(session, SearchFilters(page_size=10))
     assert total == 3

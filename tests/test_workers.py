@@ -3,6 +3,7 @@
 We don't boot Celery: we exercise the underlying async coroutine (`_run_crawler`)
 and assert the task module's retry / dispatch glue. Redis is never contacted.
 """
+
 from __future__ import annotations
 
 import json
@@ -93,7 +94,9 @@ async def patched_tasks(monkeypatch, sqlite_engine):
     monkeypatch.setattr(tasks, "_ensure_schema", AsyncMock(return_value=None))
     # Point the worker's session factory at SQLite.
     sqlite_session_factory = async_sessionmaker(
-        sqlite_engine, expire_on_commit=False, class_=AsyncSession,
+        sqlite_engine,
+        expire_on_commit=False,
+        class_=AsyncSession,
     )
     monkeypatch.setattr(tasks, "AsyncSessionLocal", sqlite_session_factory)
     return tasks
@@ -118,8 +121,11 @@ class TestRunCrawler:
         try:
             result = await patched_tasks._run_crawler("empty")
             assert result == {
-                "source": "empty", "received": 0, "inserted": 0,
-                "updated": 0, "duplicates": 0,
+                "source": "empty",
+                "received": 0,
+                "inserted": 0,
+                "updated": 0,
+                "duplicates": 0,
             }
         finally:
             registry._items.pop("empty", None)
@@ -264,9 +270,7 @@ class TestCrawlSourceRunTracking:
         original_started_at = run.started_at
         assert original_started_at is not None
 
-        succeeding = _StubCrawler(
-            jobs=[make_job(source="flaky", source_id="second-attempt")]
-        )
+        succeeding = _StubCrawler(jobs=[make_job(source="flaky", source_id="second-attempt")])
         monkeypatch.setitem(registry._items, "flaky", succeeding)
         try:
             result = await patched_tasks._run_crawler_attempt(
@@ -316,9 +320,7 @@ class TestCrawlSourceRunTracking:
 
         run = (
             await session.scalars(
-                select(CrawlRun).where(
-                    CrawlRun.celery_task_id == "task-worker-missing-001"
-                )
+                select(CrawlRun).where(CrawlRun.celery_task_id == "task-worker-missing-001")
             )
         ).one()
         assert run.source == "legacy"
@@ -362,9 +364,7 @@ class TestCrawlSourceRunTracking:
 
         runs = (
             await session.scalars(
-                select(CrawlRun).where(
-                    CrawlRun.celery_task_id == "task-worker-existing-001"
-                )
+                select(CrawlRun).where(CrawlRun.celery_task_id == "task-worker-existing-001")
             )
         ).all()
         assert len(runs) == 1
@@ -405,9 +405,7 @@ class TestCrawlSourceRunTracking:
 
         await session.refresh(run)
         assert run.status == "failed"
-        assert run.error_message == (
-            "crawl soft time limit exceeded after 120 seconds"
-        )
+        assert run.error_message == ("crawl soft time limit exceeded after 120 seconds")
         assert run.finished_at is not None
         assert run.attempt_count == 1
 
@@ -622,9 +620,7 @@ class TestCrawlSourceDispatch:
 
         runs = (
             await session.scalars(
-                select(CrawlRun).where(
-                    CrawlRun.celery_task_id == "task-dispatch-reuse-001"
-                )
+                select(CrawlRun).where(CrawlRun.celery_task_id == "task-dispatch-reuse-001")
             )
         ).all()
         assert len(runs) == 1
@@ -680,9 +676,7 @@ class TestRecoverStaleCrawlRuns:
         await session.refresh(succeeded_run)
 
         assert stale_run.status == "failed"
-        assert stale_run.error_message == (
-            "stale crawl run recovered after 20 minutes"
-        )
+        assert stale_run.error_message == ("stale crawl run recovered after 20 minutes")
         assert stale_run.finished_at is not None
         assert _as_utc(stale_run.finished_at) == recovered_at
         assert fresh_run.status == "queued"
@@ -741,9 +735,7 @@ class TestRecoverStaleCrawlRuns:
         call_kwargs = recover_mock.await_args.kwargs
         assert call_kwargs["stale_before"] == recovered_at - timedelta(minutes=20)
         assert call_kwargs["recovered_at"] == recovered_at
-        assert call_kwargs["error_message"] == (
-            "stale crawl run recovered after 20 minutes"
-        )
+        assert call_kwargs["error_message"] == ("stale crawl run recovered after 20 minutes")
 
     async def test_recovery_helper_propagates_service_errors(
         self,
@@ -965,9 +957,7 @@ class TestCeleryConfig:
     def test_recover_stale_crawl_runs_task_configuration(self):
         from app.workers.tasks import crawl_source, recover_stale_crawl_runs_task
 
-        assert recover_stale_crawl_runs_task.name == (
-            "app.workers.tasks.recover_stale_crawl_runs"
-        )
+        assert recover_stale_crawl_runs_task.name == ("app.workers.tasks.recover_stale_crawl_runs")
         assert getattr(recover_stale_crawl_runs_task.run, "__self__", None) is None
         assert recover_stale_crawl_runs_task.soft_time_limit is None
         assert recover_stale_crawl_runs_task.time_limit is None
@@ -982,9 +972,7 @@ class TestCeleryConfig:
         assert "crawl-remoteok" in entries
         assert "crawl-weworkremotely" in entries
         assert "recover-stale-crawl-runs" in entries
-        assert entries["crawl-remoteok"]["task"] == (
-            "app.workers.tasks.dispatch_crawl_source"
-        )
+        assert entries["crawl-remoteok"]["task"] == ("app.workers.tasks.dispatch_crawl_source")
         assert entries["crawl-remoteok"]["args"] == ("remoteok",)
         assert entries["crawl-remoteok"]["schedule"]._orig_minute == "*/30"
         assert entries["crawl-weworkremotely"]["task"] == (

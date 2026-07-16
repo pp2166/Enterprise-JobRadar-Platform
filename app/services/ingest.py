@@ -1,4 +1,5 @@
 """Persist normalized jobs, dedup via SimHash + upsert on (source, source_id)."""
+
 from __future__ import annotations
 
 import logging
@@ -35,14 +36,10 @@ def _upsert_stmt(dialect_name: str, table, values: dict):
     if dialect_name == "sqlite":
         stmt = sqlite_insert(table).values(**values)
         update_cols = {k: stmt.excluded[k] for k in update_cols_names}
-        return stmt.on_conflict_do_update(
-            index_elements=["source", "source_id"], set_=update_cols
-        )
+        return stmt.on_conflict_do_update(index_elements=["source", "source_id"], set_=update_cols)
     stmt = pg_insert(table).values(**values)
     update_cols = {k: stmt.excluded[k] for k in update_cols_names}
-    return stmt.on_conflict_do_update(
-        constraint="uq_jobs_source_source_id", set_=update_cols
-    )
+    return stmt.on_conflict_do_update(constraint="uq_jobs_source_source_id", set_=update_cols)
 
 
 async def ingest_jobs(session: AsyncSession, jobs: list[NormalizedJob]) -> IngestStats:
@@ -52,9 +49,7 @@ async def ingest_jobs(session: AsyncSession, jobs: list[NormalizedJob]) -> Inges
         unsigned = compute_simhash(nj.title, nj.company, nj.description)
         signed = to_signed(unsigned)
 
-        existing_stmt = select(Job).where(
-            Job.source == nj.source, Job.source_id == nj.source_id
-        )
+        existing_stmt = select(Job).where(Job.source == nj.source, Job.source_id == nj.source_id)
         existing = (await session.execute(existing_stmt)).scalar_one_or_none()
 
         if existing is None:

@@ -4,6 +4,7 @@ Covers edge cases that the core test_normalize doesn't touch: malformed HTML,
 bare tags, unicode, weird salary formats, timezone-aware inputs, and the
 NormalizedJob dataclass defaults.
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -160,6 +161,7 @@ class TestEnsureUtc:
 
     def test_aware_is_converted(self):
         from datetime import timedelta
+
         tz = timezone(timedelta(hours=5))
         dt = ensure_utc(datetime(2026, 1, 1, 12, tzinfo=tz))
         # 12:00 +05:00 == 07:00 UTC
@@ -173,8 +175,12 @@ class TestEnsureUtc:
 class TestNormalizedJobDefaults:
     def test_required_fields_only(self):
         j = NormalizedJob(
-            source="x", source_id="1", url="u", title="t",
-            company="c", description="d",
+            source="x",
+            source_id="1",
+            url="u",
+            title="t",
+            company="c",
+            description="d",
         )
         assert j.location is None
         assert j.remote is None
@@ -184,7 +190,11 @@ class TestNormalizedJobDefaults:
 
     def test_tags_are_independent_per_instance(self):
         # Default factory prevents shared-mutable-default bugs.
-        a = NormalizedJob(source="x", source_id="1", url="u", title="t", company="c", description="d")
-        b = NormalizedJob(source="x", source_id="2", url="u", title="t", company="c", description="d")
+        a = NormalizedJob(
+            source="x", source_id="1", url="u", title="t", company="c", description="d"
+        )
+        b = NormalizedJob(
+            source="x", source_id="2", url="u", title="t", company="c", description="d"
+        )
         a.tags.append("python")
         assert b.tags == []

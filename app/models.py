@@ -49,9 +49,7 @@ class Job(Base):
     simhash: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
 
     posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    fetched_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -64,6 +62,7 @@ class Job(Base):
         Index("ix_jobs_search_vector", "search_vector", postgresql_using="gin"),
         Index("ix_jobs_posted_at_desc", posted_at.desc()),
     )
+
 
 class CrawlRun(Base):
     __tablename__ = "crawl_runs"

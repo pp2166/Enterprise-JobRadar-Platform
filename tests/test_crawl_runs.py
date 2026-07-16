@@ -212,11 +212,7 @@ async def test_crawl_run_persists_success_result(session):
     await session.commit()
 
     stored = (
-        await session.execute(
-            select(CrawlRun).where(
-                CrawlRun.celery_task_id == "task-success-001"
-            )
-        )
+        await session.execute(select(CrawlRun).where(CrawlRun.celery_task_id == "task-success-001"))
     ).scalar_one()
 
     assert stored.status == "succeeded"
@@ -247,11 +243,7 @@ async def test_create_crawl_run_persists_queued_record(session):
     assert run.attempt_count == 0
     assert run.created_at is not None
 
-    stored = (
-        await session.execute(
-            select(CrawlRun).where(CrawlRun.id == run.id)
-        )
-    ).scalar_one()
+    stored = (await session.execute(select(CrawlRun).where(CrawlRun.id == run.id))).scalar_one()
 
     assert stored.source == "remoteok"
     assert stored.status == "queued"

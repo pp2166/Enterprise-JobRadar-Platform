@@ -1,4 +1,5 @@
 """Extra dedup-layer coverage: threshold behaviour, DB lookups, edge cases."""
+
 from __future__ import annotations
 
 import pytest
@@ -110,30 +111,43 @@ class TestFindDuplicateDB:
         j = make_job()
         h = to_signed(compute_simhash(j.title, j.company, j.description))
         match = await find_duplicate(
-            session, title=j.title, company=j.company,
-            simhash_signed=h, threshold=3,
+            session,
+            title=j.title,
+            company=j.company,
+            simhash_signed=h,
+            threshold=3,
         )
         assert match is None
 
     async def test_different_company_not_matched(self, session: AsyncSession, make_job):
-        j1 = make_job(title="Senior Rust Engineer", company="Acme",
-                      description="build a rust backend with tokio")
+        j1 = make_job(
+            title="Senior Rust Engineer",
+            company="Acme",
+            description="build a rust backend with tokio",
+        )
         await ingest_jobs(session, [j1])
 
-        probe = make_job(title="Senior Rust Engineer", company="OtherCo",
-                         description="build a rust backend with tokio")
+        probe = make_job(
+            title="Senior Rust Engineer",
+            company="OtherCo",
+            description="build a rust backend with tokio",
+        )
         h = to_signed(compute_simhash(probe.title, probe.company, probe.description))
 
         match = await find_duplicate(
-            session, title=probe.title, company=probe.company,
-            simhash_signed=h, threshold=3,
+            session,
+            title=probe.title,
+            company=probe.company,
+            simhash_signed=h,
+            threshold=3,
         )
         # Different company => prefilter excludes it entirely.
         assert match is None
 
     async def test_threshold_zero_requires_exact_hash_match(self, session: AsyncSession, make_job):
-        j1 = make_job(title="Python Engineer", company="Acme",
-                      description="totally unique description blob")
+        j1 = make_job(
+            title="Python Engineer", company="Acme", description="totally unique description blob"
+        )
         await ingest_jobs(session, [j1])
 
         # A completely different description → different hash → no dup at t=0.
@@ -141,7 +155,10 @@ class TestFindDuplicateDB:
             compute_simhash("Python Engineer", "Acme", "entirely unrelated content")
         )
         match = await find_duplicate(
-            session, title="Python Engineer", company="Acme",
-            simhash_signed=probe_hash, threshold=0,
+            session,
+            title="Python Engineer",
+            company="Acme",
+            simhash_signed=probe_hash,
+            threshold=0,
         )
         assert match is None

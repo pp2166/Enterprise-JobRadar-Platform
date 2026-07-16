@@ -1,4 +1,5 @@
 """Normalize heterogeneous job records into a single internal shape."""
+
 from __future__ import annotations
 
 import re
