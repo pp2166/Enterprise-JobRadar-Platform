@@ -9,10 +9,12 @@ from sqlalchemy import select
 
 from app.models import CrawlRun
 from app.services.crawl_runs import (
+    ACTIVE_CRAWL_RUN_STATUSES,
     CrawlRunNotFoundError,
     CrawlRunNotRetryableError,
     create_crawl_run,
     create_retry_crawl_run,
+    find_active_crawl_run,
     find_crawl_run_by_task_id,
     get_crawl_run,
     list_crawl_runs,
@@ -276,6 +278,171 @@ async def test_find_crawl_run_by_task_id_returns_none_for_missing_task(session):
     )
 
     assert found is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ACTIVE_CRAWL_RUN_STATUSES)
+async def test_find_active_crawl_run_returns_active_statuses(session, status):
+    run = await _create_list_run(
+        session,
+        source="remoteok",
+        status=status,
+        celery_task_id=f"task-active-{status}-001",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+    found = await find_active_crawl_run(session, source="remoteok")
+
+    assert found is not None
+    assert found.id == run.id
+    assert found.status == status
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["succeeded", "failed"])
+async def test_find_active_crawl_run_ignores_inactive_statuses(session, status):
+    await _create_list_run(
+        session,
+        source="remoteok",
+        status=status,
+        celery_task_id=f"task-inactive-{status}-001",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+    found = await find_active_crawl_run(session, source="remoteok")
+
+    assert found is None
+
+
+@pytest.mark.asyncio
+async def test_find_active_crawl_run_matches_source_exactly(session):
+    await _create_list_run(
+        session,
+        source="remoteok",
+        status="queued",
+        celery_task_id="task-active-source-001",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+    found = await find_active_crawl_run(session, source="weworkremotely")
+
+    assert found is None
+
+
+@pytest.mark.asyncio
+async def test_find_active_crawl_run_returns_none_without_active_records(session):
+    found = await find_active_crawl_run(session, source="remoteok")
+
+    assert found is None
+
+
+@pytest.mark.asyncio
+async def test_find_active_crawl_run_orders_by_created_at_then_id_desc(session):
+    await _create_list_run(
+        session,
+        source="remoteok",
+        status="queued",
+        celery_task_id="task-active-order-001",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    await _create_list_run(
+        session,
+        source="remoteok",
+        status="running",
+        celery_task_id="task-active-order-002",
+        created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+    newest = await _create_list_run(
+        session,
+        source="remoteok",
+        status="retrying",
+        celery_task_id="task-active-order-003",
+        created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+
+    found = await find_active_crawl_run(session, source="remoteok")
+
+    assert found is not None
+    assert found.id == newest.id
+
+
+@pytest.mark.asyncio
+async def test_find_active_crawl_run_prefers_active_over_historical_runs(session):
+    active = await _create_list_run(
+        session,
+        source="remoteok",
+        status="running",
+        celery_task_id="task-active-history-001",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    await _create_list_run(
+        session,
+        source="remoteok",
+        status="failed",
+        celery_task_id="task-active-history-002",
+        created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+    await _create_list_run(
+        session,
+        source="remoteok",
+        status="succeeded",
+        celery_task_id="task-active-history-003",
+        created_at=datetime(2026, 1, 3, tzinfo=timezone.utc),
+    )
+
+    found = await find_active_crawl_run(session, source="remoteok")
+
+    assert found is not None
+    assert found.id == active.id
+
+
+@pytest.mark.asyncio
+async def test_find_active_crawl_run_does_not_modify_records(session):
+    run = await _create_list_run(
+        session,
+        source="remoteok",
+        status="queued",
+        celery_task_id="task-active-readonly-001",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    original = {
+        "source": run.source,
+        "status": run.status,
+        "celery_task_id": run.celery_task_id,
+        "retry_of_run_id": run.retry_of_run_id,
+        "trigger_type": run.trigger_type,
+        "attempt_count": run.attempt_count,
+        "received": run.received,
+        "inserted": run.inserted,
+        "updated": run.updated,
+        "duplicates": run.duplicates,
+        "error_message": run.error_message,
+        "created_at": run.created_at,
+        "started_at": run.started_at,
+        "finished_at": run.finished_at,
+    }
+
+    found = await find_active_crawl_run(session, source="remoteok")
+
+    assert found is not None
+    assert found.id == run.id
+    await session.refresh(run)
+    assert {
+        "source": run.source,
+        "status": run.status,
+        "celery_task_id": run.celery_task_id,
+        "retry_of_run_id": run.retry_of_run_id,
+        "trigger_type": run.trigger_type,
+        "attempt_count": run.attempt_count,
+        "received": run.received,
+        "inserted": run.inserted,
+        "updated": run.updated,
+        "duplicates": run.duplicates,
+        "error_message": run.error_message,
+        "created_at": run.created_at,
+        "started_at": run.started_at,
+        "finished_at": run.finished_at,
+    } == original
 
 
 @pytest.mark.asyncio

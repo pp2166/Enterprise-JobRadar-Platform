@@ -11,6 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import CrawlRun
 
 
+ACTIVE_CRAWL_RUN_STATUSES = (
+    "queued",
+    "running",
+    "retrying",
+)
+
+
 @dataclass(frozen=True)
 class CrawlRunPage:
     total: int
@@ -97,6 +104,23 @@ async def find_crawl_run_by_task_id(
     celery_task_id: str,
 ) -> CrawlRun | None:
     stmt = select(CrawlRun).where(CrawlRun.celery_task_id == celery_task_id)
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def find_active_crawl_run(
+    session: AsyncSession,
+    *,
+    source: str,
+) -> CrawlRun | None:
+    stmt = (
+        select(CrawlRun)
+        .where(
+            CrawlRun.source == source,
+            CrawlRun.status.in_(ACTIVE_CRAWL_RUN_STATUSES),
+        )
+        .order_by(CrawlRun.created_at.desc(), CrawlRun.id.desc())
+        .limit(1)
+    )
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
