@@ -131,17 +131,21 @@ button {
 }
 
 #search-form button,
-.secondary-button {
+.primary-button,
+.secondary-button,
+.action-button {
   padding: 8px 14px;
 }
 
-#search-form button {
+#search-form button,
+.primary-button {
   border-color: var(--accent);
   background: var(--accent);
   color: #fff;
 }
 
 #search-form button:hover,
+.primary-button:hover:not(:disabled),
 .nav-tab.active:hover {
   background: var(--accent-dark);
 }
@@ -220,6 +224,69 @@ button {
   opacity: 0.45;
 }
 
+.task-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  padding: 12px;
+}
+
+.filter-toolbar {
+  background: #fbfcfe;
+}
+
+.field {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 180px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.field select {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card);
+  padding: 8px 10px;
+  color: var(--fg);
+  font: inherit;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.action-message {
+  margin-bottom: 12px;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.action-message.loading {
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.action-message.success {
+  border: 1px solid #bbf7d0;
+  background: #f0fdf4;
+  color: #067647;
+}
+
+.action-message.error {
+  border: 1px solid #f2b8b5;
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
 .table-wrap {
   overflow-x: auto;
   border: 1px solid var(--border);
@@ -289,6 +356,11 @@ td.error-cell {
 .status-failed {
   background: #fef3f2;
   color: #b42318;
+}
+
+.action-button {
+  padding: 5px 9px;
+  font-size: 12px;
 }
 
 .error-panel,

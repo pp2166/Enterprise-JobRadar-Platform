@@ -130,6 +130,10 @@ class TestHealth:
         home = await client.get("/")
         assert home.status_code == 200
         assert "采集任务" in home.text
+        assert "来源筛选" in home.text
+        assert "状态筛选" in home.text
+        assert "开始采集" in home.text
+        assert "操作" in home.text
         assert "/static/app.css" in home.text
         assert "/static/app.js" in home.text
 
@@ -140,6 +144,10 @@ class TestHealth:
         assert "text/css" in css.headers["content-type"]
         assert js.status_code == 200
         assert "javascript" in js.headers["content-type"]
+        assert "重新执行" in js.text
+        assert "/admin/sources" in js.text
+        assert "/admin/crawl" in js.text
+        assert "/admin/crawl-runs" in js.text
 
 
 @pytest.mark.asyncio

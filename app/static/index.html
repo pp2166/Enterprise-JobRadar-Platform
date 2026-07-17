@@ -53,6 +53,39 @@
         <button type="button" id="refresh-runs" class="secondary-button">刷新</button>
       </div>
 
+      <div class="task-toolbar" aria-label="手动开始采集">
+        <label class="field">
+          <span>开始采集</span>
+          <select id="crawl-source-select">
+            <option value="">选择来源</option>
+          </select>
+        </label>
+        <button type="button" id="start-crawl" class="primary-button">开始采集</button>
+      </div>
+
+      <form id="runs-filter-form" class="task-toolbar filter-toolbar" aria-label="采集任务筛选">
+        <label class="field">
+          <span>来源筛选</span>
+          <select id="runs-source-filter" name="source">
+            <option value="">全部来源</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>状态筛选</span>
+          <select id="runs-status-filter" name="status">
+            <option value="">全部状态</option>
+            <option value="queued">queued</option>
+            <option value="running">running</option>
+            <option value="retrying">retrying</option>
+            <option value="succeeded">succeeded</option>
+            <option value="failed">failed</option>
+          </select>
+        </label>
+        <button type="submit" class="secondary-button">查询</button>
+        <button type="button" id="reset-runs-filter" class="secondary-button">重置</button>
+      </form>
+
+      <div id="runs-action-message" class="action-message" hidden></div>
       <div id="runs-status" class="muted-line" role="status"></div>
       <div id="runs-error" class="error-panel" hidden></div>
       <div id="runs-empty" class="empty-panel" hidden>暂无采集任务</div>
@@ -74,6 +107,7 @@
               <th>created_at</th>
               <th>started_at</th>
               <th>finished_at</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody id="runs-body"></tbody>

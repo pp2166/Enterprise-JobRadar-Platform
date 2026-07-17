@@ -13,10 +13,19 @@ const runsError = document.getElementById("runs-error");
 const runsEmpty = document.getElementById("runs-empty");
 const runsBody = document.getElementById("runs-body");
 const runsPager = document.getElementById("runs-pager");
+const runsActionMessage = document.getElementById("runs-action-message");
+const runsFilterForm = document.getElementById("runs-filter-form");
+const runsSourceFilter = document.getElementById("runs-source-filter");
+const runsStatusFilter = document.getElementById("runs-status-filter");
+const resetRunsFilter = document.getElementById("reset-runs-filter");
+const crawlSourceSelect = document.getElementById("crawl-source-select");
+const startCrawlButton = document.getElementById("start-crawl");
 
 let currentPage = 1;
 let runsPage = 1;
 let runsLoaded = false;
+let sourcesLoaded = false;
+let runFilters = { source: "", status: "" };
 const PAGE_SIZE = 20;
 const RUNS_PAGE_SIZE = 20;
 
@@ -54,6 +63,69 @@ function fmtSalary(j) {
   const fmt = n => n ? `${cur} ${n.toLocaleString()}` : "";
   if (j.salary_min && j.salary_max) return `${fmt(j.salary_min)} - ${fmt(j.salary_max)}`;
   return fmt(j.salary_min || j.salary_max);
+}
+
+async function extractErrorMessage(response) {
+  const fallback = `HTTP ${response.status}`;
+  try {
+    const body = await response.json();
+    const detail = body?.detail;
+    if (typeof detail === "string") return detail;
+    if (detail && typeof detail === "object" && typeof detail.message === "string") {
+      return detail.message;
+    }
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function setActionMessage(type, message) {
+  runsActionMessage.hidden = false;
+  runsActionMessage.className = `action-message ${type}`;
+  runsActionMessage.textContent = message;
+}
+
+function clearActionMessage() {
+  runsActionMessage.hidden = true;
+  runsActionMessage.className = "action-message";
+  runsActionMessage.textContent = "";
+}
+
+function resetSelect(select, firstLabel) {
+  select.replaceChildren();
+  const option = document.createElement("option");
+  option.value = "";
+  option.textContent = firstLabel;
+  select.appendChild(option);
+}
+
+function appendSourceOptions(select, sources) {
+  for (const source of sources) {
+    const option = document.createElement("option");
+    option.value = source;
+    option.textContent = source;
+    select.appendChild(option);
+  }
+}
+
+async function loadSources() {
+  if (sourcesLoaded) return;
+
+  try {
+    const response = await fetch("/admin/sources");
+    if (!response.ok) throw new Error(await extractErrorMessage(response));
+    const body = await response.json();
+    const sources = Array.isArray(body.sources) ? body.sources : [];
+
+    resetSelect(crawlSourceSelect, "选择来源");
+    resetSelect(runsSourceFilter, "全部来源");
+    appendSourceOptions(crawlSourceSelect, sources);
+    appendSourceOptions(runsSourceFilter, sources);
+    sourcesLoaded = true;
+  } catch (e) {
+    setActionMessage("error", `加载来源失败：${e.message}`);
+  }
 }
 
 function renderJob(j) {
@@ -95,7 +167,7 @@ async function runSearch(page = 1) {
 
   try {
     const r = await fetch(`/search?${params.toString()}`);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok) throw new Error(await extractErrorMessage(r));
     const body = await r.json();
     meta.textContent = `${body.total.toLocaleString()} 个职位 / 第 ${body.page} 页`;
     results.innerHTML = body.results.map(renderJob).join("") ||
@@ -119,6 +191,11 @@ function renderStatus(status) {
   return `<span class="status-badge ${cls}">${esc(status || "-")}</span>`;
 }
 
+function renderRunAction(run) {
+  if (run.status !== "failed") return "-";
+  return `<button type="button" class="action-button retry-run" data-run-id="${esc(run.run_id)}">重新执行</button>`;
+}
+
 function renderRunRow(run) {
   return `
     <tr>
@@ -135,6 +212,7 @@ function renderRunRow(run) {
       <td>${esc(fmtLocalDateTime(run.created_at))}</td>
       <td>${esc(fmtLocalDateTime(run.started_at))}</td>
       <td>${esc(fmtLocalDateTime(run.finished_at))}</td>
+      <td>${renderRunAction(run)}</td>
     </tr>`;
 }
 
@@ -157,18 +235,23 @@ function renderRunsPager(body) {
   document.getElementById("runs-next")?.addEventListener("click", () => loadRuns(body.page + 1));
 }
 
-async function loadRuns(page = 1) {
-  runsPage = page;
-  setRunsLoading();
-
+function buildRunsParams(page) {
   const params = new URLSearchParams({
     page: String(page),
     page_size: String(RUNS_PAGE_SIZE),
   });
+  if (runFilters.source) params.set("source", runFilters.source);
+  if (runFilters.status) params.set("status", runFilters.status);
+  return params;
+}
+
+async function loadRuns(page = 1) {
+  runsPage = page;
+  setRunsLoading();
 
   try {
-    const response = await fetch(`/admin/crawl-runs?${params.toString()}`);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const response = await fetch(`/admin/crawl-runs?${buildRunsParams(page).toString()}`);
+    if (!response.ok) throw new Error(await extractErrorMessage(response));
     const body = await response.json();
     runsLoaded = true;
     runsStatus.textContent = `已加载第 ${body.page} 页`;
@@ -182,6 +265,53 @@ async function loadRuns(page = 1) {
   }
 }
 
+async function startCrawl() {
+  const source = crawlSourceSelect.value;
+  if (!source) {
+    setActionMessage("error", "请选择一个具体来源");
+    return;
+  }
+
+  startCrawlButton.disabled = true;
+  setActionMessage("loading", "正在创建采集任务...");
+
+  try {
+    const response = await fetch("/admin/crawl", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ source }),
+    });
+    if (!response.ok) throw new Error(await extractErrorMessage(response));
+    const body = await response.json();
+    const run = body.runs?.[0];
+    const runId = run?.run_id ?? "-";
+    setActionMessage("success", `已创建 ${source} 采集任务，run_id=${runId}`);
+    await loadRuns(1);
+  } catch (e) {
+    setActionMessage("error", `创建采集任务失败：${e.message}`);
+  } finally {
+    startCrawlButton.disabled = false;
+  }
+}
+
+async function retryRun(runId, button) {
+  button.disabled = true;
+  setActionMessage("loading", `正在重试任务 ${runId}...`);
+
+  try {
+    const response = await fetch(`/admin/crawl-runs/${encodeURIComponent(runId)}/retry`, {
+      method: "POST",
+    });
+    if (!response.ok) throw new Error(await extractErrorMessage(response));
+    const body = await response.json();
+    setActionMessage("success", `已创建重试任务，run_id=${body.run_id}`);
+    await loadRuns(1);
+  } catch (e) {
+    setActionMessage("error", `重试任务失败：${e.message}`);
+    button.disabled = false;
+  }
+}
+
 function switchView(viewName) {
   for (const [name, section] of Object.entries(views)) {
     section.classList.toggle("active", name === viewName);
@@ -190,8 +320,9 @@ function switchView(viewName) {
     tab.classList.toggle("active", tab.dataset.view === viewName);
   });
 
-  if (viewName === "crawl-runs" && !runsLoaded) {
-    loadRuns(1);
+  if (viewName === "crawl-runs") {
+    loadSources();
+    if (!runsLoaded) loadRuns(1);
   }
 }
 
@@ -200,6 +331,30 @@ navTabs.forEach(tab => {
 });
 
 refreshRuns.addEventListener("click", () => loadRuns(runsPage));
+
+runsFilterForm.addEventListener("submit", e => {
+  e.preventDefault();
+  runFilters = {
+    source: runsSourceFilter.value,
+    status: runsStatusFilter.value,
+  };
+  loadRuns(1);
+});
+
+resetRunsFilter.addEventListener("click", () => {
+  runsSourceFilter.value = "";
+  runsStatusFilter.value = "";
+  runFilters = { source: "", status: "" };
+  loadRuns(1);
+});
+
+startCrawlButton.addEventListener("click", startCrawl);
+
+runsBody.addEventListener("click", e => {
+  const button = e.target.closest(".retry-run");
+  if (!button) return;
+  retryRun(button.dataset.runId, button);
+});
 
 form.addEventListener("submit", e => {
   e.preventDefault();
